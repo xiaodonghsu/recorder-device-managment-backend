@@ -1,0 +1,51 @@
+# 嘉环声枢录音卡设备管理服务 —— 本地一体化环境
+# 用法：docker compose up -d
+# 说明：当前开发机器未安装 Docker，该配置未在本机实测，需在有 Docker 的环境验证。
+
+services:
+  mysql:
+    image: mysql:8.0.36
+    container_name: voicehub-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root123456
+      MYSQL_DATABASE: voicehub_device
+      MYSQL_USER: voicehub
+      MYSQL_PASSWORD: voicehub123456
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+      - --default-time-zone=+08:00
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./sql/schema.mysql.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot123456"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    container_name: voicehub-api
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      DATABASE_URL: mysql+pymysql://voicehub:voicehub123456@mysql:3306/voicehub_device?charset=utf8mb4
+      CASDOOR_BASE_URL: https://office.uassist.cn:40000/auth
+      CASDOOR_CLIENT_ID: ${CASDOOR_CLIENT_ID:-}
+      CASDOOR_CLIENT_SECRET: ${CASDOOR_CLIENT_SECRET:-}
+      CASDOOR_ORGANIZATION: ${CASDOOR_ORGANIZATION:-built-in}
+      AUTH_KEY_SECRET: ${AUTH_KEY_SECRET:-please-change-this-to-a-long-random-secret}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    ports:
+      - "8000:8000"
+
+volumes:
+  mysql-data:
