@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     casdoor_admin_roles: str = "global_admin,admin"
     casdoor_admin_groups: str = "admins"
     casdoor_global_admin_roles: str = "global_admin"
+    # Casdoor Permission 名称白名单：在 Casdoor 后台为应用创建权限后，
+    # 将权限的 name 填到这里，命中的用户即为管理员（Casdoor 官方 RBAC 用法）
+    casdoor_admin_permissions: str = ""
+    # 用户名 / 邮箱白名单（兜底方案，不依赖 Casdoor 内部权限配置）
+    casdoor_admin_users: str = ""
 
     # ---------------- 设备凭证 ----------------
     auth_key_secret: str = "please-change-this-to-a-long-random-secret"
@@ -87,6 +92,14 @@ class Settings(BaseSettings):
     @property
     def global_admin_roles(self) -> Set[str]:
         return {r.strip() for r in self.casdoor_global_admin_roles.split(",") if r.strip()}
+
+    @property
+    def admin_permissions(self) -> Set[str]:
+        return {p.strip() for p in self.casdoor_admin_permissions.split(",") if p.strip()}
+
+    @property
+    def admin_users(self) -> Set[str]:
+        return {u.strip().lower() for u in self.casdoor_admin_users.split(",") if u.strip()}
 
     @property
     def cors_origin_list(self) -> List[str]:

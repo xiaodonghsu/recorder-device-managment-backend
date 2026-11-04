@@ -158,8 +158,9 @@ CASDOOR_ORGANIZATION=built-in
 | `owner`（组织名） | `tenant_id` | 一个 Casdoor 组织 = 一个企业；多租户隔离的基准 |
 | `id`（用户 UUID） | `user_id` | 领用记录、绑定记录中保存的员工标识 |
 | `name` | 用户名 | 领用时支持填用户名，服务端经 Casdoor 解析为 UUID |
-| `role` / `roles` | 管理员判定 | 命中 `CASDOOR_ADMIN_ROLES` 即视为管理员 |
-| `groups` | 管理员判定 | 命中 `CASDOOR_ADMIN_GROUPS` 即视为管理员 |
+| `roles[].name` | 管理员判定 | 角色名（Casdoor 的 `roles` 是对象数组，不是字符串数组） |
+| `groups[]` | 管理员判定 | 用户组名（字符串数组） |
+| `permissions[].name` | 管理员判定 | 权限名（Casdoor 的 `permissions` 是对象数组） |
 | `isAdmin` | 管理员判定 | Casdoor 内置管理员标记 |
 | `isForbidden` | 登录拦截 | 被禁用的账号直接拒绝 |
 
@@ -167,15 +168,85 @@ CASDOOR_ORGANIZATION=built-in
 `tenant_id`**；越权访问一律返回 404（不泄露其他企业设备是否存在）。
 仅 `CASDOOR_GLOBAL_ADMIN_ROLES`（默认 `global_admin`）可跨企业操作。
 
-**管理员用户组**支持两种写法：
+### 4.5 管理员判定与 403 排障
+
+管理员接口要求 `is_admin = true`，判定路径有 **6 条，任一命中即可**：
+
+| # | 判定依据 | 配置项 | 默认值 |
+|---|---|---|---|
+| 1 | 角色命中跨组织管理员 | `CASDOOR_GLOBAL_ADMIN_ROLES` | `global_admin` |
+| 2 | 角色命中管理员 | `CASDOOR_ADMIN_ROLES` | `global_admin,admin` |
+| 3 | Casdoor 用户属性 `isAdmin=true` | — | — |
+| 4 | 用户组命中管理员组 | `CASDOOR_ADMIN_GROUPS` | `admins` |
+| 5 | 权限命中管理员权限 | `CASDOOR_ADMIN_PERMISSIONS` | 空 |
+| 6 | 用户名 / 邮箱命中白名单 | `CASDOOR_ADMIN_USERS` | 空 |
+
+**排障三步**：
 
 ```bash
-CASDOOR_ADMIN_GROUPS=admins            # 命中本组织的同名用户组
-CASDOOR_ADMIN_GROUPS=acme:admins       # 仅命中指定组织的同名用户组
-CASDOOR_ADMIN_GROUPS=*:admins           # 任意组织的同名用户组
+# ① 带上 Access Token 查询自己的身份与判定依据
+curl -H "Authorization: Bearer <token>" http://127.0.0.1:8000/api/my/profile
 ```
 
-### 4.5 APP / 管理后台登录流程
+响应中的 `roles` / `groups` / `permissions` 是 Casdoor 返回的原始名称，
+`admin_policy` 是当前生效的判定配置，`is_admin` 是最终结果。
+
+```json
+{
+  "username": "zhangsan",
+  "roles": ["auditor"],
+  "groups": ["acme"],
+  "permissions": [],
+  "is_admin": false,
+  "admin_reason": [],
+  "admin_policy": {
+    "admin_roles": ["admin", "global_admin"],
+    "admin_groups": ["admins"],
+    "admin_permissions": [],
+    "admin_users": [],
+    "global_admin_roles": ["global_admin"]
+  }
+}
+```
+
+**② 403 响应自带诊断信息**，无需查日志：
+
+```json
+{
+  "code": "forbidden",
+  "message": "该操作需要管理员权限",
+  "status": 403,
+  "details": {
+    "reason": "当前用户 zhangsan（角色=['auditor']，用户组=['acme']，权限=无）未命中管理员判定条件。"
+  }
+}
+```
+
+也可以用命令行自查脚本（无需启动服务）：
+
+```bash
+python scripts/whoami.py <access_token>
+```
+
+输出身份信息、各判定项命中情况与可行的授权方式。
+
+**③ 三种修复方式（任选其一）**：
+
+- **A. 在 Casdoor 后台授权角色/用户组**（推荐，保持 Casdoor 单一事实源）
+  给该用户添加名为 `admin` 的 Role，或加入名为 `admins` 的用户组。
+  若你们的角色名不是这两个，把角色名写进 `CASDOOR_ADMIN_ROLES`。
+- **B. 用 Casdoor Permission 授权**（Casdoor 官方 RBAC 用法）
+  在 Casdoor 后台为应用创建 Permission（如 `device-admin`），授权给用户/组/角色，
+  然后配置 `CASDOOR_ADMIN_PERMISSIONS=device-admin`。
+- **C. 用户名白名单**（最省事的兜底）
+  `CASDOOR_ADMIN_USERS=zhangsan,zhaoliu@acme.com`，无需改动 Casdoor。
+
+> ⚠️ Casdoor 的 `roles` 与 `permissions` 在 API 返回中是**对象数组**
+> （`[{"owner":..,"name":..}]`），不是字符串数组。若你的用户明明有管理员角色却仍被拒，
+> 请先用 `/api/my/profile` 确认 `roles` 是否为空——这通常意味着该用户根本没被授权，
+> 而不是后端解析问题。
+
+### 4.6 APP / 管理后台登录流程
 
 1. 前端从 `GET /api/auth/config` 读取 `authorization_endpoint` 与 `client_id`；
 2. 跳转授权页 → 用户在 Casdoor 登录 → 回调拿到 `code`；

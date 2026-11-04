@@ -209,3 +209,75 @@ def test_jwt_mode_verifies_signature_with_jwks():
     assert identity.tenant_id == "acme"
     assert identity.is_admin is True
     assert identity.auth_method == "jwt"
+
+
+# ---------------------------------------------------------------------------
+# 管理员判定（Casdoor 的 roles / permissions 均为对象数组）
+# ---------------------------------------------------------------------------
+def test_roles_object_array_is_parsed_to_names():
+    """Casdoor 的 roles 是 []*Role 对象数组，角色名取 Role.name。"""
+    payload = dict(CASDOOR_USER_OBJECT)
+    payload.pop("role", None)
+    payload["roles"] = [
+        {"owner": "acme", "name": "admin", "displayName": "管理员"},
+        {"owner": "acme", "name": "auditor", "displayName": "审计员"},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    client = build_client(handler)
+    identity = asyncio.run(client.verify_token("t"))
+    assert identity.roles == ["admin", "auditor"]
+    assert identity.is_admin is True
+
+
+def test_permissions_object_array_is_parsed_to_names():
+    """Casdoor 的 permissions 是 []*Permission 对象数组，权限名取 Permission.name。"""
+    payload = dict(CASDOOR_USER_OBJECT)
+    payload["permissions"] = [
+        {"owner": "acme", "name": "device-admin", "resources": ["*"], "actions": ["*"]},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    client = build_client(handler)
+    client.cfg.casdoor_admin_permissions = "device-admin"
+    identity = asyncio.run(client.verify_token("t"))
+    assert identity.permissions == ["device-admin"]
+    assert identity.is_admin is True
+    assert any("Casdoor 权限命中" in r for r in identity.admin_reason)
+
+
+def test_admin_users_whitelist_fallback():
+    payload = dict(CASDOOR_USER_OBJECT)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    client = build_client(handler)
+    client.cfg.casdoor_admin_users = "zhangsan"
+    identity = asyncio.run(client.verify_token("t"))
+    assert identity.is_admin is True
+
+    client.cfg.casdoor_admin_users = "someone-else"
+    identity = asyncio.run(client.verify_token("t"))
+    assert identity.is_admin is False
+    assert identity.admin_reason == []
+
+
+def test_non_admin_reports_diagnostics_in_403():
+    """403 响应要带上角色 / 用户组 / 权限，便于自助定位。"""
+    payload = dict(CASDOOR_USER_OBJECT)
+    payload["groups"] = ["acme"]
+    payload["roles"] = [{"owner": "acme", "name": "auditor"}]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    client = build_client(handler)
+    identity = asyncio.run(client.verify_token("t"))
+    assert identity.is_admin is False
+    assert identity.roles == ["auditor"]
+    assert identity.groups == ["acme"]

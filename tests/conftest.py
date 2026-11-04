@@ -36,6 +36,9 @@ def make_identity(
     username: str = "tester",
     is_admin: bool = False,
     is_global_admin: bool = False,
+    roles=None,
+    groups=None,
+    permissions=None,
 ) -> CasdoorIdentity:
     return CasdoorIdentity(
         user_id=user_id,
@@ -44,6 +47,9 @@ def make_identity(
         tenant_id=tenant_id,
         is_admin=is_admin,
         is_global_admin=is_global_admin,
+        roles=list(roles or []),
+        groups=list(groups or []),
+        permissions=list(permissions or []),
         auth_method="test",
     )
 
@@ -117,6 +123,9 @@ def auth(client: TestClient):
         is_admin: bool = True,
         is_global_admin: bool = False,
         username: str = "tester",
+        roles=None,
+        groups=None,
+        permissions=None,
     ) -> None:
         from app.api.deps import CurrentUser
 
@@ -126,6 +135,9 @@ def auth(client: TestClient):
             username=username,
             is_admin=is_admin,
             is_global_admin=is_global_admin,
+            roles=roles,
+            groups=groups,
+            permissions=permissions,
         )
         app.dependency_overrides[get_current_user] = lambda: CurrentUser(identity=identity)
 

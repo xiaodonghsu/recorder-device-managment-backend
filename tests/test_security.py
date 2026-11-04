@@ -156,3 +156,28 @@ def test_binding_rejects_sn_mismatch(client: TestClient, auth):
     auth("emp-001", is_admin=False)
     response = client.post(f"/api/devices/{device_id}/bind", json={"sn": "SN-OTHER"})
     assert response.status_code == 409
+
+
+def test_403_response_carries_admin_diagnostics(client: TestClient, auth):
+    """403 要能看出当前用户的角色 / 用户组 / 权限，便于自助定位。"""
+    auth("emp-001", is_admin=False, roles=["auditor"], groups=["acme"])
+    response = client.get("/api/devices")
+    assert response.status_code == 403
+    body = response.json()
+    assert body["code"] == "forbidden"
+    details = body.get("details") or {}
+    assert "reason" in details
+    assert "auditor" in details["reason"]
+    assert "acme" in details["reason"]
+
+
+def test_profile_endpoint_exposes_admin_policy(client: TestClient, auth):
+    auth("emp-001", is_admin=False, roles=["auditor"], groups=["acme"])
+    response = client.get("/api/my/profile")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["is_admin"] is False
+    assert body["roles"] == ["auditor"]
+    assert body["groups"] == ["acme"]
+    assert "admin_policy" in body
+    assert "admin_roles" in body["admin_policy"]

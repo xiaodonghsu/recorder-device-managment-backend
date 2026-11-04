@@ -76,9 +76,18 @@ async def get_current_user(
 
 
 async def require_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
-    """要求管理员角色（README §6：管理员接口需要额外检查企业和角色权限）。"""
+    """要求管理员角色（README §6：管理员接口需要额外检查企业和角色权限）。
+
+    403 时返回当前用户的角色 / 用户组 / 权限，便于自助定位判定依据。
+    """
     if not user.is_admin:
-        raise PermissionDeniedError("该操作需要管理员权限")
+        identity = user.identity
+        detail = (
+            f"当前用户 {identity.username}（角色={identity.roles or '无'}，"
+            f"用户组={identity.groups or '无'}，权限={identity.permissions or '无'}）"
+            "未命中管理员判定条件。"
+        )
+        raise PermissionDeniedError("该操作需要管理员权限", details={"reason": detail})
     return user
 
 

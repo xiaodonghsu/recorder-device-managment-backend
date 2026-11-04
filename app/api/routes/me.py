@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentUser, get_current_user
+from app.core.config import settings
 from app.db.models import Device, DeviceAssignment
 from app.db.session import get_db
 from app.schemas.common import PageQuery, PageResult
@@ -81,7 +82,11 @@ async def my_device(
 @router.get(
     "/my/profile",
     summary="当前登录身份",
-    description="返回 Casdoor 解析出的身份信息，便于 APP 展示与联调。",
+    description=(
+        "返回 Casdoor 解析出的身份信息与管理员判定依据，便于 APP 展示与联调排查。"
+        "若 is_admin 为 false，说明当前用户未命中任何管理员判定条件，"
+        "详情见 admin_policy 与 admin_reason。"
+    ),
 )
 async def my_profile(user: CurrentUser = Depends(get_current_user)) -> dict:
     identity = user.identity
@@ -93,9 +98,18 @@ async def my_profile(user: CurrentUser = Depends(get_current_user)) -> dict:
         "email": identity.email,
         "phone": identity.phone,
         "role": identity.role,
-        "groups": identity.groups,
         "roles": identity.roles,
+        "groups": identity.groups,
+        "permissions": identity.permissions,
         "is_admin": identity.is_admin,
         "is_global_admin": identity.is_global_admin,
+        "admin_reason": identity.admin_reason,
         "auth_method": identity.auth_method,
+        "admin_policy": {
+            "admin_roles": sorted(settings.admin_roles),
+            "admin_groups": sorted(settings.admin_groups),
+            "admin_permissions": sorted(settings.admin_permissions),
+            "admin_users": sorted(settings.admin_users),
+            "global_admin_roles": sorted(settings.global_admin_roles),
+        },
     }

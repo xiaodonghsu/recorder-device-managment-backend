@@ -33,7 +33,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 import httpx
 from fastapi import Request
@@ -60,8 +60,10 @@ class CasdoorIdentity:
     role: Optional[str] = None
     groups: List[str] = field(default_factory=list)
     roles: List[str] = field(default_factory=list)
+    permissions: List[str] = field(default_factory=list)
     is_admin: bool = False
     is_global_admin: bool = False
+    admin_reason: List[str] = field(default_factory=list)
     properties: Dict[str, Any] = field(default_factory=dict)
     auth_method: str = "unknown"
     raw: Dict[str, Any] = field(default_factory=dict)
@@ -77,6 +79,32 @@ def _first(obj: Dict[str, Any], *keys: str, default: Any = None) -> Any:
         if value not in (None, ""):
             return value
     return default
+
+
+def _extract_names(raw: Any) -> List[str]:
+    """从 Casdoor 返回的数组字段中提取名称列表。
+
+    Casdoor 的三种数组字段形态不一致：
+    - ``groups``      → ``[]string``
+    - ``roles``       → ``[]*Role``，名字在 ``Role.Name``
+    - ``permissions`` → ``[]*Permission``，名字在 ``Permission.Name``
+
+    旧版本 Casdoor 的 ``roles`` 可能是字符串数组，这里一并兼容。
+    """
+    names: List[str] = []
+    if not raw:
+        return names
+    if isinstance(raw, str):
+        return [raw]
+    for item in raw:
+        if isinstance(item, str):
+            if item:
+                names.append(item)
+        elif isinstance(item, dict):
+            name = item.get("name") or item.get("role") or item.get("displayName")
+            if name:
+                names.append(str(name))
+    return names
 
 
 class CasdoorClient:
@@ -405,10 +433,15 @@ class CasdoorClient:
             or self.cfg.casdoor_organization
         )
 
-        groups = [str(g) for g in (obj.get("groups") or [])]
-        roles = [str(r) for r in (obj.get("roles") or [])]
-        role = obj.get("role")
-        role = str(role) if role else None
+        groups = _extract_names(obj.get("groups"))
+        roles = _extract_names(obj.get("roles"))
+        permissions = _extract_names(obj.get("permissions"))
+        # 旧版 Casdoor 的 User.role 是单个字符串角色名
+        role: Optional[str] = None
+        legacy_role = obj.get("role")
+        if legacy_role and isinstance(legacy_role, str):
+            role = legacy_role
+            roles.insert(0, legacy_role)
 
         identity = CasdoorIdentity(
             user_id=str(user_id or username),
@@ -420,6 +453,7 @@ class CasdoorClient:
             role=role,
             groups=groups,
             roles=roles,
+            permissions=permissions,
             properties=properties if isinstance(properties, dict) else {},
             auth_method=auth_method,
             raw=obj,
@@ -428,46 +462,80 @@ class CasdoorClient:
         return identity
 
     def _apply_admin_flags(self, identity: CasdoorIdentity) -> None:
-        """按配置判定管理员与跨组织管理员。"""
+        """按配置判定管理员与跨组织管理员。
+
+        判定路径（任一命中即为管理员），并记录命中依据便于排障：
+
+        1. 角色命中 ``CASDOOR_GLOBAL_ADMIN_ROLES`` → 跨组织管理员
+        2. 角色命中 ``CASDOOR_ADMIN_ROLES``
+        3. Casdoor 用户属性 ``isAdmin == true``
+        4. 用户组命中 ``CASDOOR_ADMIN_GROUPS``
+        5. 权限命中 ``CASDOOR_ADMIN_PERMISSIONS``（Casdoor 官方 RBAC 用法）
+        6. 用户名 / 邮箱命中 ``CASDOOR_ADMIN_USERS``
+        """
         cfg = self.cfg
+        reasons: List[str] = []
+        role_names = set(identity.roles)
 
-        global_admin = bool(
-            identity.role and identity.role in cfg.global_admin_roles
-        ) or any(r in cfg.global_admin_roles for r in identity.roles)
+        global_hit = role_names & cfg.global_admin_roles
+        if global_hit:
+            identity.is_global_admin = True
+            reasons.append(f"角色命中全局管理员：{sorted(global_hit)}")
 
-        admin = global_admin
-        if identity.role and identity.role in cfg.admin_roles:
-            admin = True
-        if any(r in cfg.admin_roles for r in identity.roles):
-            admin = True
+        admin_hit = role_names & cfg.admin_roles
+        if admin_hit:
+            reasons.append(f"角色命中管理员：{sorted(admin_hit)}")
+
         if identity.raw.get("isAdmin") is True:
-            admin = True
-        if self._match_admin_groups(identity.groups, identity.tenant_id):
-            admin = True
+            reasons.append("Casdoor 用户属性 isAdmin=true")
 
-        identity.is_admin = admin
-        identity.is_global_admin = global_admin
+        matched_groups = self._match_admin_group_names(identity.groups, identity.tenant_id)
+        if matched_groups:
+            reasons.append(f"用户组命中管理员组：{sorted(matched_groups)}")
 
-    def _match_admin_groups(self, groups: Sequence[str], tenant_id: str) -> bool:
-        """管理员用户组匹配。
+        matched_perms = sorted(set(identity.permissions) & cfg.admin_permissions)
+        if matched_perms:
+            reasons.append(f"Casdoor 权限命中：{matched_perms}")
+
+        if self._match_admin_user(identity):
+            reasons.append(f"用户名/邮箱命中管理员白名单：{identity.username}")
+
+        identity.admin_reason = reasons
+        identity.is_admin = bool(reasons)
+        identity.is_global_admin = identity.is_global_admin or bool(global_hit)
+
+    def _match_admin_user(self, identity: CasdoorIdentity) -> bool:
+        """用户名 / 邮箱白名单匹配（兜底方案）。"""
+        if not self.cfg.admin_users:
+            return False
+        candidates = {
+            str(identity.username).lower(),
+            str(identity.user_id).lower(),
+            str(identity.email or "").lower(),
+        }
+        return bool(candidates & self.cfg.admin_users)
+
+    def _match_admin_group_names(
+        self, groups: Sequence[str], tenant_id: str
+    ) -> Set[str]:
+        """返回命中的管理员用户组名。
 
         支持两种写法：
         - ``admins``：命中当前组织下的同名用户组；
         - ``org:group``：命中指定组织的用户组（跨组织精确匹配）。
         """
+        matched: Set[str] = set()
         for raw in groups:
             group = str(raw)
             if group in self.cfg.admin_groups:
-                return True
+                matched.add(group)
             for pattern in self.cfg.admin_groups:
                 if ":" not in pattern:
                     continue
                 target_org, _, target_group = pattern.partition(":")
-                if target_group == group and (
-                    target_org == tenant_id or target_org == "*"
-                ):
-                    return True
-        return False
+                if target_group == group and (target_org == tenant_id or target_org == "*"):
+                    matched.add(group)
+        return matched
 
 
 # ---------------------------------------------------------------------------
