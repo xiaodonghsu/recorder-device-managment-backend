@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Generator
@@ -18,6 +19,12 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# 测试固定使用 /api 前缀。
+# 必须在导入 app.main（进而导入 app.core.config）之前设置：
+# pydantic-settings 的优先级是 环境变量 > .env 文件 > 默认值，
+# 这样本机 backend/.env 里的 API_PREFIX 不会影响测试用例里写死的路径。
+os.environ["API_PREFIX"] = "/api"
 
 from app.api.deps import get_current_user  # noqa: E402
 from app.db.models import Base  # noqa: E402

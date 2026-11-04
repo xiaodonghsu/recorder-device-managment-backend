@@ -28,6 +28,15 @@ README §8「第一阶段开发范围」中的 **P0 全部功能**均已实现�
 | 设备电量及状态监控 | `device_status` 表已建，**未开放上报接口**（固件不连后端，见 §6） | ◐ |
 | 企业服务授权 / ASR 额度 / AI 摘要额度 / OTA / 资产统计 | P2，暂未实现 | ⏳ |
 
+另有配套的**管理后台前端**（`../frontend/`，无构建步骤），按上表逐表提供管理视图：
+
+| README 需求 | 实现位置 | 状态 |
+|---|---|---|
+| 设备档案管理页面 | `frontend/assets/js/pages/devices.js` | ✅ |
+| 领用记录 / APP 绑定页面 | `frontend/assets/js/pages/assignments.js`、`bindings.js` | ✅ |
+| 设备凭证 / 设备状态 / 事件日志页面 | `frontend/assets/js/pages/credentials.js`、`statuses.js`、`events.js` | ✅ |
+| 表格级跨设备查询接口 | `app/api/routes/tables.py`、`app/services/table_service.py` | ✅ |
+
 ---
 
 ## 2. 目录结构
@@ -35,7 +44,7 @@ README §8「第一阶段开发范围」中的 **P0 全部功能**均已实现�
 ```
 backend/
 ├── app/
-│   ├── main.py                 # 应用入口、生命周期、异常处理、CORS
+│   ├── main.py                 # 应用入口、生命周期、异常处理、CORS、静态资源挂载
 │   ├── core/
 │   │   ├── config.py           # 配置中心（环境变量 / .env）
 │   │   ├── enums.py            # 生命周期状态、事件类型、状态机规则
@@ -49,14 +58,57 @@ backend/
 │   │   └── casdoor.py          # Casdoor OIDC 客户端与身份模型
 │   ├── api/
 │   │   ├── deps.py             # 认证依赖、租户范围、管理员判定
-│   │   └── routes/             # 路由：devices / bindings / credentials / me / auth
-│   └── services/               # 业务服务层（事务、状态机、事件）
+│   │   └── routes/             # 路由：devices / bindings / credentials / me / auth / tables
+│   └── services/               # 业务服务层（事务、状态机、事件、表格查询）
 ├── sql/schema.mysql.sql        # MySQL 生产建表脚本
 ├── scripts/init_db.py          # 数据库初始化脚本
-├── tests/                      # 45 个自动化测试
+├── scripts/seed_demo.py        # 演示数据生成脚本
+├── scripts/whoami.py           # 令牌身份自查脚本
+├── tests/                      # 75 个自动化测试
 ├── requirements.txt
 └── .env.example
 ```
+
+### 2.1 管理后台静态托管
+
+服务启动时会把项目根目录的 `frontend/` 挂载到 `/admin`：
+
+```bash
+python -m uvicorn app.main:app --reload --port 8000
+# 管理后台 → http://127.0.0.1:8000/admin/
+```
+
+| 配置项 | 默认值 | 说明 |
+|---|---|---|
+| `SERVE_FRONTEND` | `true` | 是否托管管理后台静态资源 |
+| `FRONTEND_DIR` | 空 | 静态目录绝对路径，留空则用项目根目录下的 `frontend/` |
+
+目录不存在时只打一条 INFO 日志跳过挂载，不影响接口服务。
+
+### 2.2 生产部署（nginx 同源代理）
+
+```
+浏览器 ──> https://office.uassist.cn:40000
+             ├── /voicehub/      → 管理后台静态资源（frontend/ 目录）
+             └── /voicehub-api/  → 后端服务 http://127.0.0.1:8040
+```
+
+后端 `.env`：
+
+```bash
+API_PREFIX=/voicehub-api        # 与 nginx 透传的路径一致
+SERVE_FRONTEND=false             # 静态资源由 nginx 直接托管
+CORS_ORIGINS=https://office.uassist.cn:40000
+```
+
+nginx 配置样例见 [`../frontend/nginx.conf.example`](../frontend/nginx.conf.example)。
+
+> ⚠️ **Windows / Git Bash 陷阱**：直接执行
+> `API_PREFIX=/voicehub-api python -m uvicorn ...` 时，MSYS 会把以 `/` 开头的值
+> 自动转换成 Windows 绝对路径（`C:/Program Files/Git/voicehub-api`），
+> 导致所有接口挂在错误路径上、服务能起但接口全 404。
+> **请写进 `backend/.env`**，或先 `export MSYS_NO_PATHCONV=1`。
+> 本服务的 `api_prefix` 校验器会拦截这种值并在启动时给出明确提示。
 
 ---
 
@@ -142,13 +194,28 @@ OIDC 发现文档 `https://office.uassist.cn:40000/auth/.well-known/openid-confi
 在 Casdoor 后台「应用」中获取 `clientId` / `clientSecret`，填入 `.env`：
 
 ```bash
-CASDOOR_CLIENT_ID=app-built-in
+# 本项目使用的应用「声枢录音卡」（owner=admin，name=voicehub）
+CASDOOR_CLIENT_ID=6932b8ce0b655b9421b5
 CASDOOR_CLIENT_SECRET=****
-CASDOOR_ORGANIZATION=built-in
+CASDOOR_ORGANIZATION=admin
 ```
 
-未配置 client 凭据时服务仍可运行（Token 走 userinfo 校验），但：
-- 无法用用户名反查 Casdoor 用户 ID（领用时只能填 UUID 形式的用户 ID）；
+> `clientId` 是**公开标识符**（会出现在前端 OAuth 跳转 URL 里），已内置在
+> `app/core/config.py` 的默认值中，环境变量可覆盖。
+> `clientSecret` 是真正的机密，只放 `.env`，不写进代码。
+
+**Casdoor 应用还须登记「许可跳转列表」**，管理后台入口对应的回调地址：
+
+| 环境 | 回调地址 |
+|---|---|
+| 生产（nginx） | `https://office.uassist.cn:40000/voicehub/` |
+| 本地（后端自带托管） | `http://127.0.0.1:8000/admin/` |
+
+未登记时跳转登录页会提示「重定向 URI 在许可跳转列表中未找到」。
+
+未配置 clientSecret 时服务仍可运行（Token 走 userinfo 校验），此时：
+- 管理后台的 Casdoor 登录（PKCE，公开客户端）**照常可用**；
+- 但无法用用户名反查 Casdoor 用户 ID（领用时只能填 UUID 形式的用户 ID）；
 - 无法使用 introspect 模式。
 
 ### 4.4 租户与身份映射
@@ -305,7 +372,22 @@ python scripts/whoami.py <access_token>
 | GET | `/api/my/profile` | U | 当前登录身份（租户、角色、是否管理员） |
 | GET | `/api/auth/config` | 公开 | Casdoor 登录参数（授权地址、client_id 等） |
 
-### 5.5 错误响应格式
+### 5.5 表格管理（跨设备只读）
+
+供管理后台「分别管理每张表」使用，全部只读；写操作仍走 §5.1–§5.3 的设备子资源接口，
+以复用状态机、事务与事件记录。
+
+| 方法 | 路径 | 权限 | 说明 |
+|---|---|---|---|
+| GET | `/api/tables/assignments` | A | device_assignment 列表（按领用状态 / 员工 / SN 筛选） |
+| GET | `/api/tables/bindings` | A | device_binding 列表（按状态 / 员工 / 昵称筛选） |
+| GET | `/api/tables/credentials` | A | device_credential 列表（不含 AuthKey 明文） |
+| GET | `/api/tables/statuses` | A | device_status 列表（按在线 / 生命周期筛选） |
+| GET | `/api/tables/events` | A | device_event 列表（按事件类型 / 设备 / 操作人筛选） |
+| GET | `/api/tables/employees` | A | 员工清单（由领用记录反推，供领用弹窗选人） |
+| GET | `/api/tables/overview` | A | 概览聚合指标（总量 / 生命周期分布 / 领用绑定 / 事件统计） |
+
+### 5.6 错误响应格式
 
 ```json
 {
@@ -392,7 +474,7 @@ python scripts/whoami.py <access_token>
 
 ```bash
 cd backend
-python -m pytest              # 45 passed
+python -m pytest              # 75 passed
 ```
 
 覆盖范围：
@@ -404,6 +486,8 @@ python -m pytest              # 45 passed
 | `tests/test_binding.py` | 绑定、非领用人拒绝、重复绑定、禁用设备不可绑定、昵称、解绑、绑定历史 |
 | `tests/test_security.py` | 未认证 / 非管理员、跨租户隔离、AuthKey 不落库、凭证与绑定唯一约束、SN 不可变 |
 | `tests/test_casdoor.py` | Casdoor userinfo / introspect 解析、管理员判定、禁用账号拒绝、登录配置 |
+| `tests/test_tables.py` | 表格级接口：五张表的跨设备列表与筛选、员工清单、概览聚合、租户隔离与管理员拦截 |
+| `tests/test_config.py` | 配置中心：`api_prefix` 规范化与 Windows 路径拦截、静态目录推导 |
 
 测试使用 SQLite 内存库，与生产 MySQL 共用同一套 ORM 与服务层代码。
 
@@ -419,7 +503,11 @@ python -m pytest              # 45 passed
 - [ ] `DATABASE_URL` 指向 MySQL 8.0.16+，并已执行 `sql/schema.mysql.sql`
 - [ ] `CORS_ORIGINS` 收敛为具体域名（不要保留 `*`）
 - [ ] Casdoor 应用已配置正确的回调地址与 Token 有效期
+      （管理后台：`https://office.uassist.cn:40000/voicehub/`）
 - [ ] 反向代理启用 HTTPS
+- [ ] `API_PREFIX` 与 nginx 透传路径一致（如 `/voicehub-api`）
+- [ ] nginx 已配置 `/voicehub/` 静态托管与 `/voicehub-api/` 反向代理
+- [ ] Casdoor 应用后台已登记管理后台回调地址 `https://office.uassist.cn:40000/voicehub/`
 
 ## 11. 后续可扩展点
 

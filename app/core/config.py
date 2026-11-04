@@ -41,9 +41,13 @@ class Settings(BaseSettings):
     # ---------------- Casdoor ----------------
     casdoor_base_url: str = "https://office.uassist.cn:40000/auth"
     casdoor_issuer: str = ""
-    casdoor_client_id: str = ""
+    # clientId 是公开标识符（会出现在前端 OAuth 跳转 URL 里），可安全地内置默认值；
+    # clientSecret 是真正的机密，只能通过环境变量 / .env 提供，不要写进代码。
+    casdoor_client_id: str = "6932b8ce0b655b9421b5"
     casdoor_client_secret: str = ""
-    casdoor_organization: str = "built-in"
+    # 应用「声枢录音卡」所属的 Casdoor 组织（= 员工的 owner，即本服务的 tenant_id）。
+    # 经核实：该应用的 owner 为 admin，应用名为 voicehub。
+    casdoor_organization: str = "admin"
     casdoor_verify_method: str = "auto"
     casdoor_timeout: float = 10.0
     casdoor_verify_tls: bool = True
@@ -66,6 +70,13 @@ class Settings(BaseSettings):
     # ---------------- CORS ----------------
     cors_origins: str = "*"
 
+    # ---------------- 管理后台静态资源 ----------------
+    serve_frontend: bool = True
+    """是否由本服务托管 ../frontend 目录（访问路径 /admin）。"""
+
+    frontend_dir: str = ""
+    """管理后台静态目录绝对路径；留空则使用项目根目录下的 frontend/。"""
+
     @field_validator("casdoor_verify_method")
     @classmethod
     def _check_verify_method(cls, v: str) -> str:
@@ -74,6 +85,36 @@ class Settings(BaseSettings):
         if value not in allowed:
             raise ValueError(f"casdoor_verify_method 必须为 {sorted(allowed)} 之一")
         return value
+
+    @field_validator("api_prefix")
+    @classmethod
+    def _check_api_prefix(cls, v: str) -> str:
+        """规范化接口前缀。
+
+        两个常见坑：
+
+        1. **漏掉前导斜杠**：写成 ``voicehub-api``。FastAPI 的
+           ``include_router(prefix=...)`` 要求前缀以 ``/`` 开头，
+           否则会在导入阶段抛断言错误，这里统一补全。
+        2. **被 shell 转换成 Windows 路径**：在 Git Bash / MSYS 下执行
+           ``API_PREFIX=/voicehub-api python ...``，MSYS 会把以 ``/`` 开头的值
+           自动转换成 ``C:/Program Files/Git/voicehub-api``，导致所有接口
+           挂在错误路径上。这里显式拦截并给出可执行的修复提示。
+        """
+        value = (v or "").strip()
+        if not value:
+            return "/api"
+        if ":" in value or "\\" in value:
+            raise ValueError(
+                "api_prefix 不应是文件路径（检测到 ':' 或 '\\'）。"
+                "在 Git Bash / MSYS 下直接写 `API_PREFIX=/voicehub-api` 会被自动"
+                "转换成 Windows 绝对路径，请改用 backend/.env 文件配置，"
+                "或执行 `export MSYS_NO_PATHCONV=1` 后再设置环境变量。"
+            )
+        if not value.startswith("/"):
+            value = "/" + value
+        value = value.rstrip("/")
+        return value or "/api"
 
     @field_validator("casdoor_base_url")
     @classmethod
@@ -106,6 +147,13 @@ class Settings(BaseSettings):
         if self.cors_origins.strip() == "*":
             return ["*"]
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def frontend_path(self) -> Path:
+        """管理后台静态目录。"""
+        if self.frontend_dir.strip():
+            return Path(self.frontend_dir).expanduser().resolve()
+        return (BASE_DIR.parent / "frontend").resolve()
 
     @property
     def is_sqlite(self) -> bool:
