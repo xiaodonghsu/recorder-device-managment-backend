@@ -15,12 +15,14 @@
 
 MySQL 生产环境也可以直接执行 sql/schema.mysql.sql（两者结构等价）。
 """
-
 from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
+
+import dotenv
+dotenv.load_dotenv(dotenv.find_dotenv())
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
