@@ -194,15 +194,20 @@ OIDC 发现文档 `https://office.uassist.cn:40000/auth/.well-known/openid-confi
 在 Casdoor 后台「应用」中获取 `clientId` / `clientSecret`，填入 `.env`：
 
 ```bash
-# 本项目使用的应用「声枢录音卡」（owner=admin，name=voicehub）
+# Casdoor 后台应用：组织 owner=bestlink，应用 name=voicehub（组合标识 bestlink/voicehub）
 CASDOOR_CLIENT_ID=6932b8ce0b655b9421b5
 CASDOOR_CLIENT_SECRET=****
-CASDOOR_ORGANIZATION=admin
+CASDOOR_ORGANIZATION=bestlink
+CASDOOR_APPLICATION=voicehub
 ```
 
 > `clientId` 是**公开标识符**（会出现在前端 OAuth 跳转 URL 里），已内置在
 > `app/core/config.py` 的默认值中，环境变量可覆盖。
 > `clientSecret` 是真正的机密，只放 `.env`，不写进代码。
+> 组织名即 `tenant_id`：**Casdoor 组织改名后，存量设备/领用数据的 `tenant_id`
+> 必须同步迁移**，否则新租户登录后看不到旧数据（越权返回 404）。
+> 应用改名后请在 Casdoor 后台复核 `clientId` 是否仍为上面的值，并确认
+> 「许可跳转列表」未因应用变更而丢失。
 
 **Casdoor 应用还须登记「许可跳转列表」**，管理后台入口对应的回调地址：
 

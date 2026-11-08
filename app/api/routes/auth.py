@@ -33,6 +33,7 @@ async def auth_config() -> Dict[str, Any]:
         "jwks_uri": f"{base}/.well-known/jwks",
         "client_id": settings.casdoor_client_id,
         "organization": settings.casdoor_organization,
+        "application": settings.casdoor_application,
         "scopes": ["openid", "profile", "email"],
         "grant_types": ["authorization_code", "refresh_token"],
     }

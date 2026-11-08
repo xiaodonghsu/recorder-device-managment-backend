@@ -45,9 +45,14 @@ class Settings(BaseSettings):
     # clientSecret 是真正的机密，只能通过环境变量 / .env 提供，不要写进代码。
     casdoor_client_id: str = "6932b8ce0b655b9421b5"
     casdoor_client_secret: str = ""
-    # 应用「声枢录音卡」所属的 Casdoor 组织（= 员工的 owner，即本服务的 tenant_id）。
-    # 经核实：该应用的 owner 为 admin，应用名为 voicehub。
-    casdoor_organization: str = "admin"
+    # Casdoor 后台「组织 / 应用」标识（2026-11-08 改名后同步）：
+    #   owner（组织）= bestlink，name（应用）= voicehub，组合即 bestlink/voicehub。
+    # 组织名同时是员工的 owner，也就是本服务的 tenant_id；改名会改变租户范围，
+    # 存量数据的 tenant_id 需另行迁移，否则旧设备对新租户不可见。
+    casdoor_organization: str = "bestlink"
+    # 应用名用于识别 Casdoor 应用与后端 /auth/config 的对外声明；OAuth 授权
+    # 实际以 client_id 为准，因此应用改名后请务必核对 clientId 是否变化。
+    casdoor_application: str = "voicehub"
     casdoor_verify_method: str = "auto"
     casdoor_timeout: float = 10.0
     casdoor_verify_tls: bool = True

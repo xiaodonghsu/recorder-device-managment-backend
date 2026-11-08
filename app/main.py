@@ -70,9 +70,9 @@ app = FastAPI(
         "所有员工接口通过 Casdoor Access Token 认证；管理员接口额外校验企业与角色权限。"
     ),
     lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc",
-    openapi_url="/openapi.json",
+    docs_url="/voicehub-api/docs",
+    redoc_url="/voicehub-api/redoc",
+    openapi_url="/voicehub-api/openapi.json",
 )
 
 app.add_middleware(

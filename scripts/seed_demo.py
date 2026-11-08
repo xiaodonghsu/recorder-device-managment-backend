@@ -44,7 +44,9 @@ from app.db.models import (  # noqa: E402
 )
 from app.db.session import create_engine_for_url, get_engine, init_db  # noqa: E402
 
-TENANT = "built-in"
+# 演示数据的租户跟随 Casdoor 组织配置（CASDOOR_ORGANIZATION）。
+# 组织改名后 tenant_id 必须同步，否则播种出来的设备对当前登录租户不可见。
+TENANT = settings.casdoor_organization
 
 MODELS = ["VH-1 Pro", "VH-1", "VH-2 Mini", "VH-3 Studio"]
 MANUFACTURERS = ["嘉环声枢"]

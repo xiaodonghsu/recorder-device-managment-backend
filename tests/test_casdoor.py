@@ -152,6 +152,8 @@ def test_introspect_mode_accepts_active_token():
 
 
 def test_auth_config_endpoint(client):
+    from app.core.config import settings
+
     response = client.get("/api/auth/config")
     assert response.status_code == 200
     body = response.json()
@@ -159,6 +161,9 @@ def test_auth_config_endpoint(client):
     assert body["token_endpoint"].endswith("/auth/api/login/oauth/access_token")
     assert body["userinfo_endpoint"].endswith("/auth/api/userinfo")
     assert "authorization_code" in body["grant_types"]
+    # 组织 / 应用标识必须与服务端配置一致（改名后由这一处下发）
+    assert body["organization"] == settings.casdoor_organization
+    assert body["application"] == settings.casdoor_application
 
 
 def test_jwt_mode_verifies_signature_with_jwks():
