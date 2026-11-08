@@ -286,3 +286,94 @@ def test_non_admin_reports_diagnostics_in_403():
     assert identity.is_admin is False
     assert identity.roles == ["auditor"]
     assert identity.groups == ["acme"]
+
+
+# ---------------------------------------------------------------------------
+# 回归：生产 Casdoor 的真实命名（role_admin + owner/group 全限定组名）
+# ---------------------------------------------------------------------------
+REAL_CASDOOR_USER = dict(
+    CASDOOR_USER_OBJECT,
+    owner="bestlink",
+    groups=["bestlink/device-admins", "bestlink/admins"],
+    roles=[
+        {"owner": "bestlink", "name": "role_admin", "displayName": "管理员"},
+        {"owner": "bestlink", "name": "user", "displayName": "普通用户"},
+    ],
+    permissions=[{"owner": "bestlink", "name": "permission_96s724"}],
+)
+
+
+def _admin_client(handler, *, roles: str, groups: str) -> CasdoorClient:
+    """显式指定判定白名单，避免测试依赖本机 backend/.env。"""
+    client = build_client(handler)
+    client.cfg.casdoor_admin_roles = roles
+    client.cfg.casdoor_admin_groups = groups
+    client.cfg.casdoor_admin_permissions = ""
+    client.cfg.casdoor_admin_users = ""
+    return client
+
+
+def test_real_casdoor_admin_names_are_recognized():
+    """role_admin 角色 + bestlink/admins 全限定组名应被判为管理员。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=REAL_CASDOOR_USER)
+
+    client = _admin_client(
+        handler, roles="global_admin,admin,role_admin", groups="admins"
+    )
+    identity = asyncio.run(client.verify_token("t"))
+
+    assert identity.roles == ["role_admin", "user"]
+    assert identity.groups == ["bestlink/device-admins", "bestlink/admins"]
+    assert identity.is_admin is True
+    assert any("role_admin" in r for r in identity.admin_reason)
+    assert any("bestlink/admins" in r for r in identity.admin_reason)
+
+
+def test_qualified_group_name_matches_short_pattern():
+    """组名带 `owner/` 前缀时，短名配置 admins 仍能命中，且不误伤其他组。"""
+    client = _admin_client(
+        lambda r: httpx.Response(200, json=CASDOOR_USER_OBJECT),
+        roles="admin", groups="admins",
+    )
+    matched = client._match_admin_group_names(
+        ["bestlink/device-admins", "bestlink/admins"], "bestlink"
+    )
+    assert matched == {"bestlink/admins"}
+
+
+def test_admin_group_pattern_variants():
+    """配置支持全限定名 / org:group / 通配组织三种写法。"""
+    client = _admin_client(
+        lambda r: httpx.Response(200, json=CASDOOR_USER_OBJECT),
+        roles="admin", groups="bestlink/device-admins",
+    )
+    groups = ["bestlink/device-admins", "bestlink/admins"]
+    assert client._match_admin_group_names(groups, "bestlink") == {"bestlink/device-admins"}
+
+    client.cfg.casdoor_admin_groups = "bestlink:device-admins"
+    assert client._match_admin_group_names(groups, "bestlink") == {"bestlink/device-admins"}
+
+    client.cfg.casdoor_admin_groups = "*/admins"
+    assert client._match_admin_group_names(groups, "built-in") == {"bestlink/admins"}
+
+    client.cfg.casdoor_admin_groups = "other/admins"
+    assert client._match_admin_group_names(groups, "built-in") == set()
+
+
+def test_unrelated_names_still_rejected():
+    """放宽组名匹配后，非管理员用户仍必须被拒绝。"""
+    payload = dict(
+        REAL_CASDOOR_USER,
+        groups=["bestlink/device-users"],
+        roles=[{"owner": "bestlink", "name": "user"}],
+        permissions=[],
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    client = _admin_client(handler, roles="global_admin,admin,role_admin", groups="admins")
+    identity = asyncio.run(client.verify_token("t"))
+    assert identity.is_admin is False
+    assert identity.admin_reason == []

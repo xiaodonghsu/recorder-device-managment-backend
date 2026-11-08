@@ -518,22 +518,56 @@ class CasdoorClient:
     def _match_admin_group_names(
         self, groups: Sequence[str], tenant_id: str
     ) -> Set[str]:
-        """返回命中的管理员用户组名。
+        """返回命中的管理员用户组名（用于排障展示的原始名称）。
 
-        支持两种写法：
-        - ``admins``：命中当前组织下的同名用户组；
-        - ``org:group``：命中指定组织的用户组（跨组织精确匹配）。
+        Casdoor 的 ``User.groups`` 是 ``[]string``，取值通常是**全限定名**
+        ``owner/group``（例如 ``bestlink/admins``），而配置里习惯写短名
+        ``admins``。若只做字符串精确比较，明明在管理员组里的用户也会被判为非管理员。
+        因此这里把每个组拆成「组织段 + 短名」再比对，规则如下：
+
+        - 配置写 ``admins``：命中同名组（无论是否带组织前缀）；
+        - 配置写 ``tenant/admins`` 或 ``tenant:admins``：精确匹配该组织的组；
+        - 配置写 ``*/admins``：通配任意组织；
+        - 配置直接写全限定名（如 ``bestlink/admins``）：与返回值精确匹配。
+
+        短名不做组织校验是有意为之：Casdoor 组织改名期间，Token 里的 ``owner``
+        可能与用户组前缀暂时不一致；且 ``is_admin`` 只决定**本租户内**的操作权限，
+        数据可见范围始终由服务端推导的 ``tenant_id`` 限定，放宽不会造成越权。
         """
         matched: Set[str] = set()
+        patterns = {str(p).strip() for p in self.cfg.admin_groups if str(p).strip()}
+        if not patterns:
+            return matched
+
         for raw in groups:
-            group = str(raw)
-            if group in self.cfg.admin_groups:
-                matched.add(group)
-            for pattern in self.cfg.admin_groups:
-                if ":" not in pattern:
+            group = str(raw).strip()
+            if not group:
+                continue
+            # 兼容旧版本可能使用的 `org:group` 写法
+            normalized = group.replace(":", "/", 1)
+            owner, sep, short = normalized.rpartition("/")
+            if not sep:
+                owner, short = tenant_id, normalized
+            elif not owner:
+                owner = tenant_id
+            if not short:
+                continue
+
+            for pattern in patterns:
+                # ① 全限定名精确匹配
+                if pattern == group or pattern.replace(":", "/", 1) == normalized:
+                    matched.add(group)
                     continue
-                target_org, _, target_group = pattern.partition(":")
-                if target_group == group and (target_org == tenant_id or target_org == "*"):
+
+                p_owner, p_sep, p_short = pattern.replace(":", "/", 1).rpartition("/")
+                if not p_sep or not p_short:
+                    # ② 短名：命中任意组织前缀下的同名组
+                    if pattern == short:
+                        matched.add(group)
+                    continue
+
+                # ③ 带组织段的精确匹配
+                if p_short == short and (p_owner in (tenant_id, "*") or p_owner == owner):
                     matched.add(group)
         return matched
 

@@ -58,7 +58,10 @@ class Settings(BaseSettings):
     casdoor_verify_tls: bool = True
     casdoor_jwks_cache_ttl: int = 3600
 
-    casdoor_admin_roles: str = "global_admin,admin"
+    # Casdoor 内置管理员角色的 name 通常是 `role_admin`（后台角色列表里带 role_ 前缀），
+    # 自建角色则常用 `admin`。三种命名都纳入默认白名单，避免"明明是管理员却进不去后台"。
+    # 用户组只需写短名：Casdoor 返回的 `bestlink/admins` 会在匹配时自动剥离组织前缀。
+    casdoor_admin_roles: str = "global_admin,admin,role_admin"
     casdoor_admin_groups: str = "admins"
     casdoor_global_admin_roles: str = "global_admin"
     # Casdoor Permission 名称白名单：在 Casdoor 后台为应用创建权限后，

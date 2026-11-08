@@ -231,7 +231,7 @@ CASDOOR_APPLICATION=voicehub
 | `id`（用户 UUID） | `user_id` | 领用记录、绑定记录中保存的员工标识 |
 | `name` | 用户名 | 领用时支持填用户名，服务端经 Casdoor 解析为 UUID |
 | `roles[].name` | 管理员判定 | 角色名（Casdoor 的 `roles` 是对象数组，不是字符串数组） |
-| `groups[]` | 管理员判定 | 用户组名（字符串数组） |
+| `groups[]` | 管理员判定 | 用户组名（字符串数组，通常是 `owner/group` 全限定名，如 `bestlink/admins`） |
 | `permissions[].name` | 管理员判定 | 权限名（Casdoor 的 `permissions` 是对象数组） |
 | `isAdmin` | 管理员判定 | Casdoor 内置管理员标记 |
 | `isForbidden` | 登录拦截 | 被禁用的账号直接拒绝 |
@@ -247,11 +247,20 @@ CASDOOR_APPLICATION=voicehub
 | # | 判定依据 | 配置项 | 默认值 |
 |---|---|---|---|
 | 1 | 角色命中跨组织管理员 | `CASDOOR_GLOBAL_ADMIN_ROLES` | `global_admin` |
-| 2 | 角色命中管理员 | `CASDOOR_ADMIN_ROLES` | `global_admin,admin` |
+| 2 | 角色命中管理员 | `CASDOOR_ADMIN_ROLES` | `global_admin,admin,role_admin` |
 | 3 | Casdoor 用户属性 `isAdmin=true` | — | — |
 | 4 | 用户组命中管理员组 | `CASDOOR_ADMIN_GROUPS` | `admins` |
 | 5 | 权限命中管理员权限 | `CASDOOR_ADMIN_PERMISSIONS` | 空 |
 | 6 | 用户名 / 邮箱命中白名单 | `CASDOOR_ADMIN_USERS` | 空 |
+
+> **命名格式坑（最容易踩）**：Casdoor 后台显示 / API 返回的 `roles[].name` 常是
+> `role_admin`（内置管理员角色），`groups[]` 则是**带组织前缀的全限定名**
+> `bestlink/admins`，而不是 `admin` / `admins`。若白名单只写 `admin` 与 `admins`，
+> 一个明明在管理员组、有管理员角色的用户仍会被判为非管理员。
+> 服务端已做两项兼容：默认角色列表包含 `role_admin`；用户组匹配时自动剥离
+> `owner/` 前缀后再与短名比对（也支持配置直接写 `bestlink/admins`、`*:admins`）。
+> `permissions[].name` 常是 `permission_96s724` 这类自动生成的随机名，
+> 用它做白名单前请确认名称稳定，更推荐用角色或用户组。
 
 **排障三步**：
 
@@ -272,7 +281,7 @@ curl -H "Authorization: Bearer <token>" http://127.0.0.1:8000/api/my/profile
   "is_admin": false,
   "admin_reason": [],
   "admin_policy": {
-    "admin_roles": ["admin", "global_admin"],
+    "admin_roles": ["admin", "global_admin", "role_admin"],
     "admin_groups": ["admins"],
     "admin_permissions": [],
     "admin_users": [],
@@ -305,8 +314,9 @@ python scripts/whoami.py <access_token>
 **③ 三种修复方式（任选其一）**：
 
 - **A. 在 Casdoor 后台授权角色/用户组**（推荐，保持 Casdoor 单一事实源）
-  给该用户添加名为 `admin` 的 Role，或加入名为 `admins` 的用户组。
-  若你们的角色名不是这两个，把角色名写进 `CASDOOR_ADMIN_ROLES`。
+  给该用户添加 `admin` / `role_admin` 角色，或加入 `admins` 用户组
+  （API 里叫 `bestlink/admins` 也能命中）。若你们用了别的角色名或组名，
+  把实际名称写进 `CASDOOR_ADMIN_ROLES` / `CASDOOR_ADMIN_GROUPS`。
 - **B. 用 Casdoor Permission 授权**（Casdoor 官方 RBAC 用法）
   在 Casdoor 后台为应用创建 Permission（如 `device-admin`），授权给用户/组/角色，
   然后配置 `CASDOOR_ADMIN_PERMISSIONS=device-admin`。

@@ -43,6 +43,12 @@ services:
       CASDOOR_CLIENT_SECRET: ${CASDOOR_CLIENT_SECRET:-}
       CASDOOR_ORGANIZATION: ${CASDOOR_ORGANIZATION:-bestlink}
       CASDOOR_APPLICATION: ${CASDOOR_APPLICATION:-voicehub}
+      # 管理员判定：容器不读 backend/.env，需显式透传，否则只能用代码默认值
+      CASDOOR_ADMIN_ROLES: ${CASDOOR_ADMIN_ROLES:-global_admin,admin,role_admin}
+      CASDOOR_ADMIN_GROUPS: ${CASDOOR_ADMIN_GROUPS:-admins}
+      CASDOOR_ADMIN_PERMISSIONS: ${CASDOOR_ADMIN_PERMISSIONS:-}
+      CASDOOR_ADMIN_USERS: ${CASDOOR_ADMIN_USERS:-}
+      CASDOOR_GLOBAL_ADMIN_ROLES: ${CASDOOR_GLOBAL_ADMIN_ROLES:-global_admin}
       AUTH_KEY_SECRET: ${AUTH_KEY_SECRET:-please-change-this-to-a-long-random-secret}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
     ports:
