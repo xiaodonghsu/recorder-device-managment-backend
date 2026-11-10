@@ -24,9 +24,9 @@ router = APIRouter(tags=["我的设备"])
 def _my_devices_stmt(user: CurrentUser):
     """当前用户「领用中」的设备查询。
 
-    ``user_refs`` 同时包含 Casdoor 用户 UUID 与用户名：领用记录可能存的是
-    工号（管理员手工填写且后端未配置客户端凭据时无法反查为 UUID），
-    只按 Token 的 UUID 精确比较会把这类记录全部漏掉。
+    业务表 ``user_id`` 列的规范值是工号（``preferred_username``）。
+    ``user_refs`` 同时纳入技术 UUID，只为兼容按 UUID 写入的历史记录；
+    姓名（display_name）不参与匹配。
     租户范围仍严格取服务端推导的 ``user.tenant_id``，不采信客户端传值。
     """
     return (
@@ -94,6 +94,9 @@ async def my_device(
     summary="当前登录身份",
     description=(
         "返回 Casdoor 解析出的身份信息与管理员判定依据，便于 APP 展示与联调排查。"
+        "注意三个标识的区别：user_id 是 Casdoor 技术 UUID；username / "
+        "preferred_username / employee_no 是工号（业务侧员工唯一标识，与领用记录的 "
+        "user_id 对应）；display_name 是姓名，仅用于展示、禁止用于身份匹配。"
         "若 is_admin 为 false，说明当前用户未命中任何管理员判定条件，"
         "详情见 admin_policy 与 admin_reason。"
     ),
@@ -103,6 +106,8 @@ async def my_profile(user: CurrentUser = Depends(get_current_user)) -> dict:
     return {
         "user_id": identity.user_id,
         "username": identity.username,
+        "preferred_username": identity.username,
+        "employee_no": identity.employee_no,
         "display_name": identity.display_name,
         "tenant_id": identity.tenant_id,
         "email": identity.email,

@@ -49,7 +49,21 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class CasdoorIdentity:
-    """与业务无关的已认证身份。"""
+    """与业务无关的已认证身份。
+
+    三个标识必须严格区分（Casdoor ``/api/userinfo`` 返回的是 OIDC claims）：
+
+    ======================  ==========================  ==========================
+    属性                     来源 claim                  用途
+    ======================  ==========================  ==========================
+    ``user_id``             ``sub`` / ``id``（UUID）     技术标识：审计、兼容历史记录
+    ``username``            ``preferred_username``       工号：业务侧员工唯一标识
+    ``display_name``        ``name`` / ``displayName``   姓名：仅用于界面展示
+    ======================  ==========================  ==========================
+
+    业务表 ``device_assignment.user_id`` / ``device_binding.user_id`` 存的是
+    **工号**；姓名可能重名，禁止参与身份匹配。
+    """
 
     user_id: str
     username: str
@@ -71,6 +85,15 @@ class CasdoorIdentity:
     @property
     def label(self) -> str:
         return self.display_name or self.username
+
+    @property
+    def employee_no(self) -> str:
+        """业务侧员工唯一标识：工号（preferred_username）。
+
+        与 ``user_id``（技术 UUID）不同。旧版本 Token 若没有 preferred_username，
+        回退到 UUID，保证该值恒非空且不会误用姓名。
+        """
+        return self.username or self.user_id
 
 
 def _first(obj: Dict[str, Any], *keys: str, default: Any = None) -> Any:
@@ -190,7 +213,8 @@ class CasdoorClient:
             raise AuthenticationError("访问令牌无效或已过期")
 
         sub = _first(response, "sub", "user_id", "uid")
-        username = _first(response, "username", "name", "preferred_username")
+        username = _first(response, "preferred_username", "username", "name")
+        display_name = _first(response, "name", "displayName", default=username)
         if not sub and not username:
             raise AuthenticationError("访问令牌缺少用户标识")
 
@@ -218,7 +242,7 @@ class CasdoorClient:
         identity = CasdoorIdentity(
             user_id=str(sub or username),
             username=str(username or sub or ""),
-            display_name=str(username or sub or ""),
+            display_name=str(display_name or username or sub or ""),
             tenant_id=tenant,
             auth_method="introspect",
             raw=response,
@@ -447,8 +471,20 @@ class CasdoorClient:
         if obj.get("isForbidden") is True:
             raise AuthenticationError("该账号已被禁用")
 
+        # /api/userinfo 返回 OIDC claims，/api/get-user 返回 Casdoor 用户对象，
+        # 两者对 `name` 的定义恰好相反，必须按来源分别解析：
+        #   OIDC claims : sub=UUID, preferred_username=工号, name=姓名
+        #   用户对象     : id=UUID,  name=工号,               displayName=姓名
+        # 若统一按 "name" 取用户名，就会把「胥晓冬」当成员工标识，
+        # 导致领用记录里的工号 JH000059 永远匹配不上登录身份。
+        oidc_claims = "preferred_username" in obj or ("sub" in obj and "id" not in obj)
         user_id = _first(obj, "id", "sub", "user_id", "uid")
-        username = _first(obj, "name", "preferred_username", "username", "login")
+        if oidc_claims:
+            username = _first(obj, "preferred_username", "username", "login", "name")
+            display_name = _first(obj, "name", "displayName", "display_name", default=username)
+        else:
+            username = _first(obj, "name", "preferred_username", "username", "login")
+            display_name = _first(obj, "displayName", "display_name", "name", default=username)
         if not user_id and not username:
             raise AuthenticationError("用户信息缺少唯一标识")
 
@@ -477,7 +513,7 @@ class CasdoorClient:
         identity = CasdoorIdentity(
             user_id=str(user_id or username),
             username=str(username or user_id),
-            display_name=str(_first(obj, "displayName", "name", default=username) or username),
+            display_name=str(display_name or username or user_id),
             tenant_id=tenant_id,
             email=_first(obj, "email"),
             phone=_first(obj, "phone"),

@@ -137,11 +137,10 @@ def test_binding_records_events(client: TestClient, auth):
     assert "device_assigned" in types
 
 
-def test_my_devices_matches_username_alias(client: TestClient, auth):
-    """回归：管理员按工号分配，员工用 Casdoor UUID 登录仍能看到并绑定设备。
+def test_my_devices_matches_employee_no(client: TestClient, auth):
+    """回归：领用记录按工号写入，员工 Token 里 user_id 是 UUID、username 是工号。
 
-    后台未配置 CASDOOR_CLIENT_SECRET 时，resolve_employee_id 无法把用户名反查成
-    UUID，领用记录会原样保存工号；员工 Token 里的 user_id 却是 UUID。
+    preferred_username（工号）才是业务唯一标识；name（姓名）只能用于展示。
     """
     auth("u-admin", is_admin=True)
     device_id = client.post("/api/devices", json={"sn": "SN-ALIAS-1"}).json()["id"]
@@ -149,8 +148,13 @@ def test_my_devices_matches_username_alias(client: TestClient, auth):
     assert assigned.status_code == 200, assigned.text
     assert assigned.json()["user_id"] == "JH000059"
 
-    # 员工 Token 中 user_id 为 Casdoor UUID，username 才是工号
-    auth("7994b554-b159-4a6b-bdba-0703193e6ed8", is_admin=False, username="JH000059")
+    # 模拟生产 /api/userinfo：sub=UUID，preferred_username=工号，name=姓名
+    auth(
+        "7994b554-b159-4a6b-bdba-0703193e6ed8",
+        is_admin=False,
+        username="JH000059",
+        display_name="胥晓冬",
+    )
 
     listing = client.get("/api/my/devices")
     assert listing.status_code == 200, listing.text
@@ -184,3 +188,51 @@ def test_my_devices_total_counts_all_matches(client: TestClient, auth):
     body = client.get("/api/my/devices?page=1&page_size=2").json()
     assert body["total"] == 3
     assert len(body["items"]) == 2
+
+
+def test_user_refs_excludes_display_name():
+    """姓名可能重名，绝不能作为员工唯一标识参与匹配。"""
+    from app.api.deps import CurrentUser
+    from app.integrations.casdoor import CasdoorIdentity
+
+    identity = CasdoorIdentity(
+        user_id="7994b554-b159-4a6b-bdba-0703193e6ed8",
+        username="JH000059",
+        display_name="胥晓冬",
+        tenant_id="bestlink",
+    )
+    user = CurrentUser(identity=identity)
+    assert user.employee_no == "JH000059"
+    assert user.user_refs == ["7994b554-b159-4a6b-bdba-0703193e6ed8", "JH000059"]
+
+
+def test_my_profile_exposes_employee_no_and_display_name(client: TestClient, auth):
+    auth(
+        "7994b554-b159-4a6b-bdba-0703193e6ed8",
+        is_admin=False,
+        username="JH000059",
+        display_name="胥晓冬",
+    )
+    body = client.get("/api/my/profile").json()
+    assert body["user_id"] == "7994b554-b159-4a6b-bdba-0703193e6ed8"
+    assert body["username"] == "JH000059"
+    assert body["preferred_username"] == "JH000059"
+    assert body["employee_no"] == "JH000059"
+    assert body["display_name"] == "胥晓冬"
+
+
+def test_my_devices_ignores_assignment_stored_with_display_name(client: TestClient, auth):
+    """误把姓名写进领用记录时，不能被当成同一员工命中。"""
+    auth("u-admin", is_admin=True)
+    device_id = client.post("/api/devices", json={"sn": "SN-NAME-1"}).json()["id"]
+    assert client.post(
+        f"/api/devices/{device_id}/assign", json={"user_id": "胥晓冬"}
+    ).status_code == 200
+
+    auth(
+        "7994b554-b159-4a6b-bdba-0703193e6ed8",
+        is_admin=False,
+        username="JH000059",
+        display_name="胥晓冬",
+    )
+    assert client.get("/api/my/devices").json()["total"] == 0

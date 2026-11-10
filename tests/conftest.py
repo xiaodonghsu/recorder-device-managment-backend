@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Generator
+from typing import Generator, Optional
 
 import pytest
 from fastapi.testclient import TestClient
@@ -40,17 +40,24 @@ def make_identity(
     user_id: str,
     *,
     tenant_id: str = TENANT,
-    username: str = "tester",
+    username: Optional[str] = None,
+    display_name: Optional[str] = None,
     is_admin: bool = False,
     is_global_admin: bool = False,
     roles=None,
     groups=None,
     permissions=None,
 ) -> CasdoorIdentity:
+    """构造测试身份。
+
+    ``username`` 语义是工号（preferred_username），默认等于 user_id，
+    避免所有测试用户共用一个工号；``display_name`` 是姓名，仅用于展示。
+    """
+    employee_no = username if username is not None else user_id
     return CasdoorIdentity(
         user_id=user_id,
-        username=username,
-        display_name=username,
+        username=employee_no,
+        display_name=display_name if display_name is not None else employee_no,
         tenant_id=tenant_id,
         is_admin=is_admin,
         is_global_admin=is_global_admin,
@@ -129,7 +136,8 @@ def auth(client: TestClient):
         tenant_id: str = TENANT,
         is_admin: bool = True,
         is_global_admin: bool = False,
-        username: str = "tester",
+        username: Optional[str] = None,
+        display_name: Optional[str] = None,
         roles=None,
         groups=None,
         permissions=None,
@@ -140,6 +148,7 @@ def auth(client: TestClient):
             user_id,
             tenant_id=tenant_id,
             username=username,
+            display_name=display_name,
             is_admin=is_admin,
             is_global_admin=is_global_admin,
             roles=roles,

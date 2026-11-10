@@ -48,19 +48,24 @@ class CurrentUser:
         return self.identity.tenant_id
 
     @property
+    def employee_no(self) -> str:
+        """业务侧员工唯一标识：工号（Casdoor ``preferred_username``）。
+
+        写入 ``device_assignment.user_id`` / ``device_binding.user_id`` 的值，
+        与 ``user_id``（Token 里的技术 UUID）不是同一个东西。
+        """
+        return self.identity.employee_no
+
+    @property
     def user_refs(self) -> List[str]:
-        """可与业务表 ``user_id`` 列比对的全部身份标识。
+        """查询业务表 ``user_id`` 列时可接受的标识集合。
 
-        Token 里的 ``user_id`` 是 Casdoor 用户 UUID，但领用记录可能写入了
-        用户名 / 工号：``resolve_employee_id`` 在未配置 CASDOOR_CLIENT_SECRET、
-        无法调用 Casdoor 反查时会按原值透传。若只做 UUID 精确匹配，就会出现
-        「后台分配成功，员工登录后 /my/devices 却是空列表」。
-
-        Casdoor 的 ``name`` 在同一组织内唯一，配合 tenant 过滤不会放宽越权范围。
+        规范值是工号；额外纳入技术 UUID，只为兼容按 UUID 写入的历史领用记录。
+        **不包含** ``display_name``（姓名可能重名，不能作为唯一标识）。
         """
         refs = {
             str(value).strip()
-            for value in (self.identity.user_id, self.identity.username)
+            for value in (self.identity.employee_no, self.identity.user_id)
             if value and str(value).strip()
         }
         return sorted(refs)
@@ -133,29 +138,30 @@ async def resolve_employee_id(
     tenant_id: str,
     user_ref: str,
 ) -> str:
-    """把「用户名 / 工号 / 用户 id」解析为 Casdoor 用户 id。
+    """把领用表单里的输入规范化为**工号**（``preferred_username``）。
 
-    - 形如 UUID 的直接作为用户 id；
-    - 否则向 Casdoor 查询该组织下的用户（支持用户名与 ``owner/name`` 两种形式）；
-    - 查询不到时按原值透传（兼容外部用户中心自定义标识），但会记录告警，
-      因为该值可能与员工 Token 中的 UUID 不一致，导致「我的设备」查不到。
+    业务约定：``device_assignment.user_id`` 存工号，不是 Casdoor UUID。
+
+    - 非 UUID 输入：视为工号，直接返回。**不依赖 CASDOOR_CLIENT_SECRET**，
+      也不需要访问 Casdoor，管理员按工号分配即可直接生效；
+    - UUID 输入：尝试用服务令牌反查对应的工号；反查失败时告警并原值返回，
+      以兼容按 UUID 写入的历史数据。
     """
     value = (user_ref or "").strip()
     if not value:
-        raise ValidationError("员工标识不能为空")
-    if _UUID_RE.match(value):
+        raise ValidationError("员工工号不能为空")
+    if not _UUID_RE.match(value):
         return value
 
     user_obj = await client.get_user(tenant_id, value)
     if user_obj and isinstance(user_obj, dict):
-        resolved = user_obj.get("id")
+        resolved = user_obj.get("preferred_username") or user_obj.get("name")
         if resolved:
             return str(resolved)
 
     logger.warning(
-        "员工标识 %r 未能反查为 Casdoor 用户 UUID（tenant=%s，客户端凭据=%s），"
-        "将按原值写入领用记录。请配置 CASDOOR_CLIENT_SECRET 或改填用户 UUID，"
-        "否则该员工登录后 /my/devices 可能因标识不匹配而返回空列表。",
+        "输入 %r 是用户 UUID，未能反查为工号（tenant=%s，客户端凭据=%s），"
+        "将按原值写入领用记录；建议改填工号 preferred_username。",
         value,
         tenant_id,
         "已配置" if client.cfg.casdoor_has_client_credentials else "缺失",

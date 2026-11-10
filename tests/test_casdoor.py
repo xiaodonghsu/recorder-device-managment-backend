@@ -66,7 +66,48 @@ def test_userinfo_maps_casdoor_user_to_identity():
     assert identity.tenant_id == "acme"
     assert identity.email == "zhangsan@example.com"
     assert identity.auth_method == "userinfo"
+    assert identity.display_name == "张三"
+    assert identity.employee_no == "zhangsan"
+    assert identity.tenant_id == "acme"
+    assert identity.email == "zhangsan@example.com"
+    assert identity.auth_method == "userinfo"
     assert identity.is_admin is False
+
+
+# 生产 /api/userinfo 的真实形态：OIDC claims（不是 Casdoor 用户对象）
+OIDC_USERINFO_CLAIMS = {
+    "sub": "7994b554-b159-4a6b-bdba-0703193e6ed8",
+    "iss": "https://office.uassist.cn:40000/auth",
+    "aud": "6932b8ce0b655b9421b5",
+    "preferred_username": "JH000059",
+    "name": "胥晓冬",
+    "email": "xxd@bestlink.com.cn",
+    "groups": ["bestlink/device-admins", "bestlink/admins"],
+    "roles": ["role_admin", "user"],
+    "permissions": ["permission_96s724"],
+}
+
+
+def test_oidc_claims_separate_employee_no_from_display_name():
+    """preferred_username 是工号（业务唯一标识），name 是姓名（仅展示）。
+
+    回归：旧实现把 `name` 当用户名，导致 /my/profile 返回 "胥晓冬"，
+    而领用记录存的是工号 JH000059，员工登录后 /my/devices 永远为空。
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=OIDC_USERINFO_CLAIMS)
+
+    client = build_client(handler)
+    identity = asyncio.run(client.verify_token("test-token"))
+
+    assert identity.user_id == "7994b554-b159-4a6b-bdba-0703193e6ed8"
+    assert identity.username == "JH000059"
+    assert identity.employee_no == "JH000059"
+    assert identity.display_name == "胥晓冬"
+    assert identity.label == "胥晓冬"
+    assert identity.email == "xxd@bestlink.com.cn"
+    assert identity.tenant_id == client.cfg.casdoor_organization
+    assert identity.auth_method == "userinfo"
 
 
 def test_admin_flag_from_role():

@@ -163,6 +163,8 @@ async def assign(
     client: CasdoorClient = Depends(get_casdoor_client),
 ) -> AssignmentOut:
     tenant_id = resolve_target_tenant(user, payload.tenant_id)
+    # 领用记录写入的是工号（preferred_username），不是 Token 里的 Casdoor UUID；
+    # 管理员按工号填写时无需任何 Casdoor 查询。
     employee_id = await resolve_employee_id(client, tenant_id, payload.user_id)
     assignment = assign_device(
         db,

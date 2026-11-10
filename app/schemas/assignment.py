@@ -16,7 +16,7 @@ class AssignmentCreate(BaseModel):
     user_id: str = Field(
         min_length=1,
         max_length=64,
-        description="领用员工标识（Casdoor 用户 id 或用户名）",
+        description="领用员工工号（Casdoor preferred_username，如 JH000059）",
     )
     tenant_id: Optional[str] = Field(
         default=None, max_length=64, description="目标企业；不填则归属自身企业"

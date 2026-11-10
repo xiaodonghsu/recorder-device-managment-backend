@@ -220,21 +220,34 @@ CASDOOR_APPLICATION=voicehub
 
 未配置 clientSecret 时服务仍可运行（Token 走 userinfo 校验），此时：
 - 管理后台的 Casdoor 登录（PKCE，公开客户端）**照常可用**；
-- 但无法用用户名反查 Casdoor 用户 ID（领用时只能填 UUID 形式的用户 ID）；
-- 无法使用 introspect 模式。
+- 设备领用直接填**工号**（`preferred_username`）即可，工号即业务唯一标识，无需任何反查；
+- 只有「把用户 UUID 反查成工号」和 introspect 模式才必须配置 clientSecret。
 
 ### 4.4 租户与身份映射
 
 | Casdoor 字段 | 本服务概念 | 说明 |
 |---|---|---|
 | `owner`（组织名） | `tenant_id` | 一个 Casdoor 组织 = 一个企业；多租户隔离的基准 |
-| `id`（用户 UUID） | `user_id` | 领用记录、绑定记录中保存的员工标识 |
-| `name` | 用户名 | 领用时支持填用户名，服务端经 Casdoor 解析为 UUID |
+| `preferred_username`（工号） | `user_id`（业务表） | **员工唯一标识**：写入 `device_assignment` / `device_binding` 的 `user_id` 列；`/my/*` 与 APP 绑定均按它匹配 |
+| `sub` / `id`（用户 UUID） | 技术标识 | Token 里的 `sub`，只用于审计与兼容按 UUID 写入的历史记录，**不作为业务归属值** |
+| `name` / `displayName` | `display_name` | 姓名，仅用于界面展示；可能重名，**禁止参与身份匹配** |
 | `roles[].name` | 管理员判定 | 角色名（Casdoor 的 `roles` 是对象数组，不是字符串数组） |
 | `groups[]` | 管理员判定 | 用户组名（字符串数组，通常是 `owner/group` 全限定名，如 `bestlink/admins`） |
 | `permissions[].name` | 管理员判定 | 权限名（Casdoor 的 `permissions` 是对象数组） |
 | `isAdmin` | 管理员判定 | Casdoor 内置管理员标记 |
 | `isForbidden` | 登录拦截 | 被禁用的账号直接拒绝 |
+
+> **字段陷阱**：`/api/userinfo` 返回 OIDC claims，`/api/get-user` 返回 Casdoor 用户对象，
+> 两者对 `name` 的定义恰好相反——前者 `name` 是姓名、`preferred_username` 是工号；
+> 后者 `name` 是工号、`displayName` 是姓名。生产实调样例：
+>
+> ```json
+> {"sub":"7994b554-b159-4a6b-bdba-0703193e6ed8",
+>  "preferred_username":"JH000059","name":"胥晓冬","email":"xxd@bestlink.com.cn"}
+> ```
+>
+> `GET /my/profile` 会同时返回 `user_id`（UUID）、`username` / `preferred_username` /
+> `employee_no`（三处同值，均为工号）、`display_name`（姓名），联调先核对这几项。
 
 **租户隔离**：管理员接口的可见范围由服务端从 Token 推导，**不采信客户端提交的
 `tenant_id`**；越权访问一律返回 404（不泄露其他企业设备是否存在）。
