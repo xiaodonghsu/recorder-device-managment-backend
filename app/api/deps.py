@@ -10,7 +10,12 @@ from typing import List, Optional
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.core.errors import AuthenticationError, PermissionDeniedError, ValidationError
+from app.core.errors import (
+    AuthenticationError,
+    CasdoorError,
+    PermissionDeniedError,
+    ValidationError,
+)
 from app.integrations.casdoor import CasdoorClient, CasdoorIdentity, get_casdoor_client
 
 logger = logging.getLogger(__name__)
@@ -30,6 +35,9 @@ class CurrentUser:
     """
 
     identity: CasdoorIdentity
+    # 原始 access token 仅在「以当前管理员身份代查 Casdoor 用户」时使用。
+    # 严禁写进日志、事件数据或任何响应体。
+    access_token: Optional[str] = None
 
     @property
     def user_id(self) -> str:
@@ -95,7 +103,7 @@ async def get_current_user(
 
     client: CasdoorClient = get_casdoor_client(request)
     identity = await client.verify_token(credentials.credentials)
-    return CurrentUser(identity=identity)
+    return CurrentUser(identity=identity, access_token=credentials.credentials)
 
 
 async def require_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
@@ -137,33 +145,79 @@ async def resolve_employee_id(
     client: CasdoorClient,
     tenant_id: str,
     user_ref: str,
+    *,
+    access_token: Optional[str] = None,
 ) -> str:
-    """把领用表单里的输入规范化为**工号**（``preferred_username``）。
+    """把领用表单输入规范化为**工号**，并校验该工号在 Casdoor 中真实存在。
 
-    业务约定：``device_assignment.user_id`` 存工号，不是 Casdoor UUID。
+    业务约定：``device_assignment.user_id`` 存工号（``preferred_username``），
+    不是 Casdoor UUID、也不是姓名。校验规则：
 
-    - 非 UUID 输入：视为工号，直接返回。**不依赖 CASDOOR_CLIENT_SECRET**，
-      也不需要访问 Casdoor，管理员按工号分配即可直接生效；
-    - UUID 输入：尝试用服务令牌反查对应的工号；反查失败时告警并原值返回，
-      以兼容按 UUID 写入的历史数据。
+    - 先按 ``CASDOOR_VERIFY_EMPLOYEE`` 决定强度（off / optional / required）；
+    - 工号命中 → 写回 Casdoor 的规范 ``name``（查询大小写不敏感，管理员输入
+      ``jh000059`` 也会规范化成 ``JH000059``）；
+    - 明确查无此人 / 组织不符 / 账号禁用 → 拒绝分配，不产生孤儿领用记录；
+    - Casdoor 查询本身不可用 → optional 降级放行并告警，required 直接 502；
+    - UUID 输入不是工号：尝试反查，反查不到则明确报错，绝不静默写入业务表。
+
+    本实例的 ``/api/get-user`` 是公开只读接口，因此**不依赖 CASDOOR_CLIENT_SECRET**
+    也能完成校验；若 Casdoor 收紧权限，可配服务令牌或透传管理员 access token。
     """
     value = (user_ref or "").strip()
     if not value:
         raise ValidationError("员工工号不能为空")
-    if not _UUID_RE.match(value):
+
+    mode = (getattr(client.cfg, "casdoor_verify_employee", "optional") or "optional").lower()
+
+    if _UUID_RE.match(value):
+        user_obj = None
+        if mode != "off":
+            user_obj = await client.get_user(tenant_id, value, access_token=access_token)
+        resolved = None
+        if isinstance(user_obj, dict):
+            resolved = user_obj.get("name") or user_obj.get("preferred_username")
+        if not resolved:
+            raise ValidationError(
+                "填入的是 Casdoor 用户 UUID，不是工号；请填 preferred_username（如 JH000059）",
+                error_code="employee_no_required",
+                details={"input": value, "tenant_id": tenant_id},
+            )
+        value = str(resolved)
+
+    if mode == "off":
         return value
 
-    user_obj = await client.get_user(tenant_id, value)
-    if user_obj and isinstance(user_obj, dict):
-        resolved = user_obj.get("preferred_username") or user_obj.get("name")
-        if resolved:
-            return str(resolved)
+    result = await client.lookup_employee(tenant_id, value, access_token=access_token)
+    if result.found:
+        logger.info(
+            "工号校验通过：%s（%s，tenant=%s）",
+            result.employee_no,
+            result.display_name or "-",
+            tenant_id,
+        )
+        return result.employee_no or value
 
+    if result.status == "absent":
+        raise ValidationError(
+            f"员工工号 {value!r} 校验未通过：{result.reason}",
+            error_code="employee_not_found",
+            details={
+                "employee_no": value,
+                "tenant_id": tenant_id,
+                "reason": result.reason,
+            },
+        )
+
+    reason = result.reason or "Casdoor 用户查询不可用"
+    if mode == "required":
+        raise CasdoorError(
+            f"无法校验员工工号 {value!r}：{reason}",
+            details={"employee_no": value, "tenant_id": tenant_id},
+        )
     logger.warning(
-        "输入 %r 是用户 UUID，未能反查为工号（tenant=%s，客户端凭据=%s），"
-        "将按原值写入领用记录；建议改填工号 preferred_username。",
+        "工号 %r 未能完成 Casdoor 存在性校验（%s），按 "
+        "CASDOOR_VERIFY_EMPLOYEE=optional 放行；要求强一致请设为 required。",
         value,
-        tenant_id,
-        "已配置" if client.cfg.casdoor_has_client_credentials else "缺失",
+        reason,
     )
     return value

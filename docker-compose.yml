@@ -43,6 +43,9 @@ services:
       CASDOOR_CLIENT_SECRET: ${CASDOOR_CLIENT_SECRET:-}
       CASDOOR_ORGANIZATION: ${CASDOOR_ORGANIZATION:-bestlink}
       CASDOOR_APPLICATION: ${CASDOOR_APPLICATION:-voicehub}
+      # 容器不读 backend/.env，工号校验策略需显式透传
+      CASDOOR_VERIFY_EMPLOYEE: ${CASDOOR_VERIFY_EMPLOYEE:-optional}
+      CASDOOR_VERIFY_METHOD: ${CASDOOR_VERIFY_METHOD:-auto}
       # 管理员判定：容器不读 backend/.env，需显式透传，否则只能用代码默认值
       CASDOOR_ADMIN_ROLES: ${CASDOOR_ADMIN_ROLES:-global_admin,admin,role_admin}
       CASDOOR_ADMIN_GROUPS: ${CASDOOR_ADMIN_GROUPS:-admins}

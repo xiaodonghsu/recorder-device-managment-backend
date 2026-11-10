@@ -153,7 +153,11 @@ async def update_device(
     "/devices/{device_id}/assign",
     response_model=AssignmentOut,
     summary="分配设备给员工",
-    description="管理员将设备分配给员工；一台设备同时只能分配给一个员工。",
+    description=(
+        "管理员将设备分配给员工；一台设备同时只能分配给一个员工。"
+        "提交的是员工工号（preferred_username），服务端会向 Casdoor 校验该工号"
+        "在本组织内存在且账号可用，校验强度由 CASDOOR_VERIFY_EMPLOYEE 控制。"
+    ),
 )
 async def assign(
     payload: AssignmentCreate,
@@ -163,9 +167,12 @@ async def assign(
     client: CasdoorClient = Depends(get_casdoor_client),
 ) -> AssignmentOut:
     tenant_id = resolve_target_tenant(user, payload.tenant_id)
-    # 领用记录写入的是工号（preferred_username），不是 Token 里的 Casdoor UUID；
-    # 管理员按工号填写时无需任何 Casdoor 查询。
-    employee_id = await resolve_employee_id(client, tenant_id, payload.user_id)
+    # 领用记录写入的是工号（preferred_username），不是 Token 里的 Casdoor UUID。
+    # 分配前先向 Casdoor 确认工号存在、组织一致、账号未禁用，避免产生
+    # 「设备分给了不存在的工号，员工永远登不进来」的孤儿记录。
+    employee_id = await resolve_employee_id(
+        client, tenant_id, payload.user_id, access_token=user.access_token
+    )
     assignment = assign_device(
         db,
         device_id,

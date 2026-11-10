@@ -29,11 +29,48 @@ os.environ["API_PREFIX"] = "/api"
 from app.api.deps import get_current_user  # noqa: E402
 from app.db.models import Base  # noqa: E402
 from app.db.session import get_db  # noqa: E402
-from app.integrations.casdoor import CasdoorIdentity  # noqa: E402
+from app.integrations.casdoor import (  # noqa: E402
+    CasdoorIdentity,
+    EmployeeLookup,
+    get_casdoor_client,
+)
 from app.main import app  # noqa: E402
 
 TENANT = "acme"
 OTHER_TENANT = "globex"
+
+
+class FakeCasdoorClient:
+    """Casdoor 查询替身：默认「工号存在」，让所有既有测试保持原有行为。
+
+    单元测试不应真的访问 production Casdoor；需要模拟
+    「不存在 / 跨组织 / 禁用 / 查询不可用」时，用 ``lookup_result`` 覆盖。
+    """
+
+    def __init__(self) -> None:
+        from app.core.config import settings
+
+        self.cfg = settings
+        self.lookup_result: Optional[EmployeeLookup] = None
+        self.user_object: Optional[dict] = None
+        self.lookup_calls: list = []
+        self.user_calls: list = []
+
+    async def lookup_employee(self, owner, employee_no, *, access_token=None):
+        self.lookup_calls.append((owner, employee_no, access_token))
+        if self.lookup_result is not None:
+            return self.lookup_result
+        return EmployeeLookup(
+            "found",
+            employee_no=employee_no,
+            display_name="测试员工",
+            owner=owner,
+            user_id=f"uuid-{employee_no}",
+        )
+
+    async def get_user(self, owner, user_id_or_name, *, access_token=None):
+        self.user_calls.append((owner, user_id_or_name))
+        return self.user_object
 
 
 def make_identity(
@@ -100,7 +137,18 @@ def session(engine: Engine) -> Generator[Session, None, None]:
 
 
 @pytest.fixture()
-def client(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> Generator[TestClient, None, None]:
+def casdoor() -> Generator[FakeCasdoorClient, None, None]:
+    """把 /devices/{id}/assign 的 Casdoor 依赖替换为可控替身。"""
+    fake = FakeCasdoorClient()
+    app.dependency_overrides[get_casdoor_client] = lambda: fake
+    yield fake
+    app.dependency_overrides.pop(get_casdoor_client, None)
+
+
+@pytest.fixture()
+def client(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, casdoor: FakeCasdoorClient
+) -> Generator[TestClient, None, None]:
     """TestClient，数据库依赖指向内存库，认证依赖由用例自行覆盖。"""
     import app.main as main_module
 
@@ -141,6 +189,7 @@ def auth(client: TestClient):
         roles=None,
         groups=None,
         permissions=None,
+        access_token: Optional[str] = None,
     ) -> None:
         from app.api.deps import CurrentUser
 
@@ -155,6 +204,8 @@ def auth(client: TestClient):
             groups=groups,
             permissions=permissions,
         )
-        app.dependency_overrides[get_current_user] = lambda: CurrentUser(identity=identity)
+        app.dependency_overrides[get_current_user] = lambda: CurrentUser(
+            identity=identity, access_token=access_token
+        )
 
     return _apply

@@ -57,6 +57,15 @@ class Settings(BaseSettings):
     casdoor_timeout: float = 10.0
     casdoor_verify_tls: bool = True
     casdoor_jwks_cache_ttl: int = 3600
+    # 领用时是否向 Casdoor 校验工号（preferred_username）真实存在：
+    #   off      —— 不校验，完全离线（仅供测试 / 无 Casdoor 环境）
+    #   optional —— 能查就查；查到「工号不存在 / 组织不符 / 账号禁用」则拒绝，
+    #               但 Casdoor 不可达或接口无权限时降级放行并告警（默认，可用性优先）
+    #   required —— 连查询都做不到时也拒绝分配，适合要求强一致的生产环境
+    # 本实例的 /api/get-user 只读接口无需令牌，因此不配 clientSecret 也能真正校验；
+    # 若 Casdoor 收紧了权限，可配 CASDOOR_CLIENT_SECRET 走服务令牌，或把请求方
+    # 管理员的 access token 透传过去（见 CasdoorClient.lookup_employee）。
+    casdoor_verify_employee: str = "optional"
 
     # Casdoor 内置管理员角色的 name 通常是 `role_admin`（后台角色列表里带 role_ 前缀），
     # 自建角色则常用 `admin`。三种命名都纳入默认白名单，避免"明明是管理员却进不去后台"。
@@ -92,6 +101,15 @@ class Settings(BaseSettings):
         value = (v or "auto").strip().lower()
         if value not in allowed:
             raise ValueError(f"casdoor_verify_method 必须为 {sorted(allowed)} 之一")
+        return value
+
+    @field_validator("casdoor_verify_employee")
+    @classmethod
+    def _check_verify_employee(cls, v: str) -> str:
+        allowed = {"off", "optional", "required"}
+        value = (v or "optional").strip().lower()
+        if value not in allowed:
+            raise ValueError(f"casdoor_verify_employee 必须为 {sorted(allowed)} 之一")
         return value
 
     @field_validator("api_prefix")

@@ -220,8 +220,12 @@ CASDOOR_APPLICATION=voicehub
 
 未配置 clientSecret 时服务仍可运行（Token 走 userinfo 校验），此时：
 - 管理后台的 Casdoor 登录（PKCE，公开客户端）**照常可用**；
-- 设备领用直接填**工号**（`preferred_username`）即可，工号即业务唯一标识，无需任何反查；
-- 只有「把用户 UUID 反查成工号」和 introspect 模式才必须配置 clientSecret。
+- 设备领用直接填**工号**（`preferred_username`）即可，工号即业务唯一标识，无需反查；
+- **分配时的工号存在性校验照常生效**：本实例 `GET /auth/api/get-user?id=<owner>/<工号>`
+  是公开只读接口，无需令牌（详见 §4.4 末段）。若 Casdoor 收紧该接口权限，
+  可配 `clientSecret` 走服务令牌，或由后端透传管理员 access token；
+- introspect 校验模式仍需 clientSecret；「按用户 UUID 反查工号」在本实例
+  Casdoor 版本上不受支持，因此领用表单直接拒绝 UUID 输入。
 
 ### 4.4 租户与身份映射
 
@@ -252,6 +256,47 @@ CASDOOR_APPLICATION=voicehub
 **租户隔离**：管理员接口的可见范围由服务端从 Token 推导，**不采信客户端提交的
 `tenant_id`**；越权访问一律返回 404（不泄露其他企业设备是否存在）。
 仅 `CASDOOR_GLOBAL_ADMIN_ROLES`（默认 `global_admin`）可跨企业操作。
+
+**分配时的工号存在性校验**（`POST /api/devices/{id}/assign`）：
+管理员填工号后，服务端先向 Casdoor 查 `id=<tenant_id>/<工号>`，确认这个人在本组织
+里真实存在、账号未被禁用，才写领用记录；否则拒绝，避免产生「设备分给了不存在的工号，
+员工永远登不进来」的孤儿数据。
+
+查询结果是**三态**，`unavailable` 绝不能当成「工号不存在」（Casdoor 一抖动就全部分配失败）：
+
+| 结果 | 判定 | 处理 |
+|---|---|---|
+| `found` | 用户存在、`owner` 与目标租户一致、`isForbidden/isDeleted` 均为假 | 写入 Casdoor 返回的规范 `name` |
+| `absent` | `data:null` / 组织不符 / 账号禁用或删除 | 422 `employee_not_found`，不落库 |
+| `unavailable` | 接口不可达、无权限、响应无法解析 | 按 `CASDOOR_VERIFY_EMPLOYEE` 策略处理 |
+
+`CASDOOR_VERIFY_EMPLOYEE`（默认 `optional`）三档：
+
+| 值 | 查不到人 | 查询不可用 | 适用 |
+|---|---|---|---|
+| `off` | 放行 | 不发起查询 | 离线 / 测试 |
+| `optional` | 422 拒绝 | **告警并放行**（可用性优先） | 默认 |
+| `required` | 422 拒绝 | 502 `casdoor_error` 拒绝 | 要求强一致 |
+
+生产实调结论（2026-11-10，`https://office.uassist.cn:40000/auth`）：
+
+- `?owner=bestlink&id=bestlink/JH000059` → `{"status":"ok","data":{"owner":"bestlink",
+  "name":"JH000059","displayName":"胥晓冬","id":"7994b554-…","isForbidden":false}}`；
+- `?id=bestlink/NO_SUCH_EMP` → `{"status":"ok","data":null}`，即明确的「不存在」；
+- **`owner` 查询参数会被 Casdoor 忽略**（`id` 才是唯一依据），所以必须校验返回对象
+  的 `owner`，否则别家组织的工号会被误判存在；
+- 工号大小写不敏感（`jh000059` 也返回 `JH000059`），因此写库用返回的规范 `name`；
+- 裸工号、裸 UUID、`owner/UUID` 都查不到（返回 `GetOwnerAndNameFromId() error`
+  或 `data:null`），所以 UUID 输入在业务层直接 422 `employee_no_required`；
+- `GET /api/get-users` 需要授权（`Unauthorized operation`），不能用于匿名枚举组织成员。
+
+查询身份按「服务令牌 → 当前管理员 access token → 匿名」依次尝试；原始 Token 只存在
+请求级 `CurrentUser.access_token`，不写入日志、事件数据或任何响应体。
+
+> **安全提示**：本实例 `/auth/api/get-user` 匿名可读，意味着组织成员对象（含邮箱等）
+> 可被枚举。这是 Casdoor 侧既有配置，不是本服务引入的。若需收紧，请在 Casdoor
+> 侧限制该接口权限，并在 `.env` 配好 `CASDOOR_CLIENT_SECRET` 走服务令牌；本服务的
+> 校验链路会自动改用有身份的请求，`absent` / `unavailable` 判定不受影响。
 
 ### 4.5 管理员判定与 403 排障
 
@@ -363,7 +408,7 @@ python scripts/whoami.py <access_token>
 | POST | `/api/devices/batch` | A | 批量入库（≤1000 条，单条失败不影响其余） |
 | GET | `/api/devices/{id}` | A | 设备详情 |
 | PUT | `/api/devices/{id}` | A | 更新档案（SN 不可改） |
-| POST | `/api/devices/{id}/assign` | A | 分配设备给员工 |
+| POST | `/api/devices/{id}/assign` | A | 分配设备给员工（提交工号；校验存在性、组织一致性与账号状态） |
 | POST | `/api/devices/{id}/return` | A | 设备归还（解绑 + 关闭领用） |
 | POST | `/api/devices/{id}/disable` | A | 禁用设备 |
 | POST | `/api/devices/{id}/enable` | A | 启用设备 |
@@ -434,7 +479,9 @@ python scripts/whoami.py <access_token>
 | `conflict` | 409 | SN 重复、重复领用 / 绑定、设备已被占用 |
 | `invalid_device_state` | 409 | 设备生命周期状态不允许当前操作 |
 | `validation_error` | 422 | 参数校验失败 |
-| `casdoor_error` | 502 | Casdoor 服务异常 |
+| `employee_not_found` | 422 | 工号在 Casdoor 中不存在 / 组织不符 / 账号禁用（继承 `validation_error` 状态码） |
+| `employee_no_required` | 422 | 领用表单填了 Casdoor UUID 或姓名，应填工号 `preferred_username` |
+| `casdoor_error` | 502 | Casdoor 服务异常；`CASDOOR_VERIFY_EMPLOYEE=required` 且工号查询不可用时也会返回 |
 
 ---
 
@@ -511,6 +558,7 @@ python -m pytest              # 75 passed
 |---|---|
 | `tests/test_device_crud.py` | 入库、SN 唯一、批量入库、档案更新、生命周期流转、事件落库 |
 | `tests/test_assignment.py` | 领用、重复领用、禁用设备不可领用、归还、归还后重新分配、归还即失权 |
+| `tests/test_employee_lookup.py` | 工号存在性校验：命中规范化、不存在/跨组织/禁用拒绝、查询不可用降级、required/off 策略、UUID 输入拒绝 |
 | `tests/test_binding.py` | 绑定、非领用人拒绝、重复绑定、禁用设备不可绑定、昵称、解绑、绑定历史 |
 | `tests/test_security.py` | 未认证 / 非管理员、跨租户隔离、AuthKey 不落库、凭证与绑定唯一约束、SN 不可变 |
 | `tests/test_casdoor.py` | Casdoor userinfo / introspect 解析、管理员判定、禁用账号拒绝、登录配置 |
@@ -527,7 +575,9 @@ python -m pytest              # 75 passed
 
 - [ ] `.env` 中 `APP_ENV=production`
 - [ ] `AUTH_KEY_SECRET` 替换为 32 位以上随机值（否则启动日志给出告警）
-- [ ] `CASDOOR_CLIENT_ID` / `CASDOOR_CLIENT_SECRET` 已配置
+- [ ] `CASDOOR_CLIENT_ID` / `CASDOOR_CLIENT_SECRET` 已配置（introspect 与严格查询身份所需）
+- [ ] `CASDOOR_VERIFY_EMPLOYEE` 已按一致性要求选定 `optional` / `required`；容器部署时
+      已在 `docker-compose.yml` 透传
 - [ ] `DATABASE_URL` 指向 MySQL 8.0.16+，并已执行 `sql/schema.mysql.sql`
 - [ ] `CORS_ORIGINS` 收敛为具体域名（不要保留 `*`）
 - [ ] Casdoor 应用已配置正确的回调地址与 Token 有效期

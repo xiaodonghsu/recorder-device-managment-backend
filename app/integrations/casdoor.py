@@ -104,6 +104,35 @@ def _first(obj: Dict[str, Any], *keys: str, default: Any = None) -> Any:
     return default
 
 
+@dataclass(frozen=True)
+class EmployeeLookup:
+    """工号存在性查询结果，必须是三态而不能只用 bool。
+
+    ==================  ==========================================================
+    ``status``           语义
+    ==================  ==========================================================
+    ``found``            Casdoor 中存在该工号，且组织一致、账号未禁用
+    ``absent``           明确查无此工号 / 组织不符 / 账号禁用 → 应拒绝分配
+    ``unavailable``      Casdoor 不可达、接口无权限、响应无法解析 → 不能据此下结论
+    ==================  ==========================================================
+
+    把「查询不可用」当成「工号不存在」会造成大面积误杀：Casdoor 一抖动，
+    所有设备都分配不出去。因此两者必须分开，由 ``casdoor_verify_employee``
+    策略决定 ``unavailable`` 是降级放行还是拒绝。
+    """
+
+    status: str
+    employee_no: str = ""
+    display_name: str = ""
+    owner: str = ""
+    user_id: str = ""
+    reason: str = ""
+
+    @property
+    def found(self) -> bool:
+        return self.status == "found"
+
+
 def _extract_names(raw: Any) -> List[str]:
     """从 Casdoor 返回的数组字段中提取名称列表。
 
@@ -360,34 +389,150 @@ class CasdoorClient:
             return payload
         return None
 
-    async def get_user(self, owner: str, user_id_or_name: str) -> Optional[Dict[str, Any]]:
-        """按 owner + 用户 UUID / 用户名查询 Casdoor 用户。
+    async def _user_query_tokens(self, access_token: Optional[str]) -> List[Optional[str]]:
+        """构造查询 ``/api/get-user`` 时依次尝试的身份。
 
-        ``/api/get-user`` 的 ``id`` 参数在多数版本里要求全限定名 ``owner/name``，
-        部分版本也接受用户 UUID；两种形式依次尝试。查询失败返回 ``None``，
-        由调用方决定是否按原值透传。
+        1. 服务令牌（需 CASDOOR_CLIENT_ID + CASDOOR_CLIENT_SECRET，最稳定）；
+        2. 当前请求管理员的 access token（Casdoor 收紧只读权限时的兜底）；
+        3. 匿名（本实例的 ``get-user`` 是公开只读接口，实测无需令牌即可查询，
+           这样不配 clientSecret 也能在领用时真正校验工号）。
+
+        ``None`` 表示不带 Authorization 头。
         """
+        tokens: List[Optional[str]] = []
         service_token = await self.get_service_token()
-        if not service_token:
-            return None
+        if service_token:
+            tokens.append(service_token)
+        if access_token and access_token.strip() and access_token not in tokens:
+            tokens.append(access_token.strip())
+        tokens.append(None)
+        return tokens
 
-        value = (user_id_or_name or "").strip()
-        if not value:
-            return None
-        candidates = [value]
-        qualified = f"{owner}/{value}"
-        if not value.startswith(f"{owner}/") and qualified not in candidates:
-            candidates.append(qualified)
-
-        for candidate in candidates:
+    async def _fetch_user(
+        self,
+        owner: str,
+        candidate: str,
+        tokens: List[Optional[str]],
+    ) -> tuple[Optional[Dict[str, Any]], str]:
+        """返回 (Casdoor 响应, 失败原因)。任一身份拿到明确响应即停止尝试。"""
+        last_error = ""
+        for token in tokens:
+            headers = {"Authorization": f"Bearer {token}"} if token else None
             try:
                 payload = await self._get_json(
                     "/api/get-user",
                     params={"owner": owner, "id": candidate},
-                    headers={"Authorization": f"Bearer {service_token}"},
+                    headers=headers,
                 )
-            except CasdoorError as exc:
-                logger.warning("查询 Casdoor 用户失败（id=%s）：%s", candidate, exc)
+            except (AuthenticationError, CasdoorError) as exc:
+                last_error = str(getattr(exc, "message", exc))
+                continue
+            # status=error 常见于「该身份无权查询」或 id 格式不对；换身份再试一次
+            if isinstance(payload, dict) and payload.get("status") == "error":
+                last_error = str(payload.get("msg") or "Casdoor 拒绝查询")
+                continue
+            return payload, ""
+        return None, last_error or "Casdoor 未返回用户查询响应"
+
+    @staticmethod
+    def _classify_user_payload(
+        payload: Optional[Dict[str, Any]],
+        tenant_id: str,
+        requested: str,
+        *,
+        fallback_reason: str = "",
+    ) -> EmployeeLookup:
+        """把 ``/api/get-user`` 响应归类为 found / absent / unavailable。
+
+        两个实测坑：
+
+        - 查询参数里的 ``owner`` 会被 Casdoor 忽略（``id`` 才是唯一依据），
+          所以必须校验**返回对象**的 ``owner``，否则别的组织的工号会被当成存在；
+        - 工号大小写不敏感（``jh000059`` 也返回 ``JH000059``），因此写入业务表的
+          必须是 Casdoor 返回的规范 ``name``，而不是管理员输入的原值。
+        """
+        if not isinstance(payload, dict):
+            return EmployeeLookup("unavailable", reason=fallback_reason or "用户查询无响应")
+        if payload.get("status") == "error":
+            return EmployeeLookup(
+                "unavailable", reason=str(payload.get("msg") or fallback_reason or "Casdoor 查询失败")
+            )
+
+        data = payload.get("data")
+        if not isinstance(data, dict) or not data:
+            data = payload if payload.get("id") else None
+
+        if isinstance(data, dict) and data.get("id"):
+            owner = str(data.get("owner") or "")
+            if owner and owner != tenant_id:
+                return EmployeeLookup(
+                    "absent", owner=owner, reason=f"该用户属于组织 {owner}，不属于 {tenant_id}"
+                )
+            if data.get("isForbidden") is True or data.get("isDeleted") is True or data.get("deletedTime"):
+                return EmployeeLookup(
+                    "absent", owner=owner, reason="该账号已禁用或已删除"
+                )
+            employee_no = str(
+                _first(data, "name", "preferred_username", "preferredUsername", "username") or ""
+            )
+            if not employee_no:
+                return EmployeeLookup("unavailable", reason="用户对象缺少工号字段（name）")
+            return EmployeeLookup(
+                "found",
+                employee_no=employee_no,
+                display_name=str(_first(data, "displayName", "display_name", default="") or ""),
+                owner=owner,
+                user_id=str(data["id"]),
+            )
+
+        if payload.get("data") is None and payload.get("status") == "ok":
+            return EmployeeLookup("absent", reason=f"组织 {tenant_id} 中不存在工号 {requested!r}")
+        return EmployeeLookup("unavailable", reason=fallback_reason or "无法解析 Casdoor 用户响应")
+
+    async def lookup_employee(
+        self,
+        owner: str,
+        employee_no: str,
+        *,
+        access_token: Optional[str] = None,
+    ) -> EmployeeLookup:
+        """校验工号（Casdoor 用户名 / ``preferred_username``）是否真实可用。
+
+        只查 ``id=<owner>/<工号>`` 这一种形式：实测裸工号与裸 UUID 都会被
+        Casdoor 判为 ``GetOwnerAndNameFromId() error``，查 UUID 需要管理员令牌
+        拉全量用户，成本高且权限不一定有，因此 UUID 输入在业务层直接拒绝。
+        """
+        value = (employee_no or "").strip()
+        if not value:
+            return EmployeeLookup("absent", reason="工号不能为空")
+        candidate = value if "/" in value else f"{owner}/{value}"
+        tokens = await self._user_query_tokens(access_token)
+        payload, error = await self._fetch_user(owner, candidate, tokens)
+        result = self._classify_user_payload(payload, owner, value, fallback_reason=error)
+        if result.status == "unavailable":
+            logger.warning("工号 %r 校验查询不可用（tenant=%s）：%s", value, owner, result.reason)
+        return result
+
+    async def get_user(
+        self,
+        owner: str,
+        user_id_or_name: str,
+        *,
+        access_token: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """按 owner + 用户 UUID / 用户名查询 Casdoor 用户（兼容旧调用）。
+
+        不再强依赖服务令牌：与 ``lookup_employee`` 共用身份链。
+        """
+        value = (user_id_or_name or "").strip()
+        if not value:
+            return None
+        candidates = [value] if "/" in value else [f"{owner}/{value}", value]
+        tokens = await self._user_query_tokens(access_token)
+        for candidate in candidates:
+            payload, error = await self._fetch_user(owner, candidate, tokens)
+            if payload is None:
+                logger.debug("查询 Casdoor 用户失败（id=%s）：%s", candidate, error)
                 continue
             user = self._unwrap_user(payload)
             if user:
