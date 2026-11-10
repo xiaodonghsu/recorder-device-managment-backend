@@ -135,3 +135,52 @@ def test_binding_records_events(client: TestClient, auth):
     assert "device_unbound" in types
     assert "device_activated" in types
     assert "device_assigned" in types
+
+
+def test_my_devices_matches_username_alias(client: TestClient, auth):
+    """回归：管理员按工号分配，员工用 Casdoor UUID 登录仍能看到并绑定设备。
+
+    后台未配置 CASDOOR_CLIENT_SECRET 时，resolve_employee_id 无法把用户名反查成
+    UUID，领用记录会原样保存工号；员工 Token 里的 user_id 却是 UUID。
+    """
+    auth("u-admin", is_admin=True)
+    device_id = client.post("/api/devices", json={"sn": "SN-ALIAS-1"}).json()["id"]
+    assigned = client.post(f"/api/devices/{device_id}/assign", json={"user_id": "JH000059"})
+    assert assigned.status_code == 200, assigned.text
+    assert assigned.json()["user_id"] == "JH000059"
+
+    # 员工 Token 中 user_id 为 Casdoor UUID，username 才是工号
+    auth("7994b554-b159-4a6b-bdba-0703193e6ed8", is_admin=False, username="JH000059")
+
+    listing = client.get("/api/my/devices")
+    assert listing.status_code == 200, listing.text
+    body = listing.json()
+    assert body["total"] == 1
+    assert [item["id"] for item in body["items"]] == [device_id]
+    assert client.get(f"/api/my/devices/{device_id}").status_code == 200
+
+    # 绑定关系必须沿用领用记录里的标识，否则组合外键 (assignment_id, device_id,
+    # user_id) 不成立，且解绑 / 改昵称也会因标识不匹配被拒绝。
+    bound = client.post(f"/api/devices/{device_id}/bind", json={"nickname": "我的录音卡"})
+    assert bound.status_code == 200, bound.text
+    assert bound.json()["user_id"] == "JH000059"
+
+    renamed = client.put(f"/api/devices/{device_id}/nickname", json={"nickname": "新昵称"})
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["nickname"] == "新昵称"
+    assert client.post(f"/api/devices/{device_id}/unbind").status_code == 200
+
+
+def test_my_devices_total_counts_all_matches(client: TestClient, auth):
+    """回归：total 是全部匹配记录数，不是当前页行数。"""
+    auth("u-admin", is_admin=True)
+    for index in range(3):
+        device_id = client.post("/api/devices", json={"sn": f"SN-PAGE-{index}"}).json()["id"]
+        assert client.post(
+            f"/api/devices/{device_id}/assign", json={"user_id": "emp-page"}
+        ).status_code == 200
+
+    auth("emp-page", is_admin=False)
+    body = client.get("/api/my/devices?page=1&page_size=2").json()
+    assert body["total"] == 3
+    assert len(body["items"]) == 2

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional, Sequence
+from typing import Collection, Optional, Sequence, Union
 
 from sqlalchemy.orm import Session
 
@@ -147,14 +147,22 @@ def get_assignment_for_device(db: Session, device_id: int) -> Optional[DeviceAss
 def assert_holder(
     db: Session,
     device_id: int,
-    user_id: str,
+    user_refs: Union[str, Collection[str]],
     *,
     is_admin: bool = False,
 ) -> DeviceAssignment:
-    """校验当前用户是否为该设备的领用员工（README §7.6）。"""
+    """校验当前用户是否为该设备的领用员工（README §7.6）。
+
+    兼容领用记录中保存的是用户名/工号而非 Casdoor UUID 的历史数据。
+    """
+    refs = (
+        {user_refs.strip()}
+        if isinstance(user_refs, str)
+        else {str(v).strip() for v in user_refs if v and str(v).strip()}
+    )
     assignment = load_current_assignment(db, device_id)
     if assignment is None:
         raise PermissionDeniedError("设备未被领用，无法操作")
-    if assignment.user_id != user_id and not is_admin:
+    if assignment.user_id not in refs and not is_admin:
         raise PermissionDeniedError("只有当前领用员工可以执行该操作")
     return assignment

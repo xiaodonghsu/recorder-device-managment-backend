@@ -43,7 +43,7 @@ async def bind(
     binding = bind_device(
         db,
         device_id,
-        user_id=user.user_id,
+        user_refs=user.user_refs,
         tenant_scope=user.tenant_scope,
         operator_id=user.user_id,
         nickname=payload.nickname,
@@ -79,7 +79,7 @@ async def unbind(
     binding = unbind_device(
         db,
         device_id,
-        user_id=user.user_id,
+        user_refs=user.user_refs,
         tenant_scope=user.tenant_scope,
         operator_id=user.user_id,
         is_admin=user.is_admin,
@@ -117,7 +117,7 @@ async def set_nickname(
         db,
         device_id,
         nickname=payload.nickname,
-        user_id=user.user_id,
+        user_refs=user.user_refs,
         tenant_scope=user.tenant_scope,
         operator_id=user.user_id,
         is_admin=user.is_admin,
@@ -167,7 +167,7 @@ def _filter_bindings_for_user(
     device = device_service.get_device_row(db, device_id, user.tenant_scope, with_status=False)
     stmt = select(DeviceBinding).where(
         DeviceBinding.device_id == device.id,
-        DeviceBinding.user_id == user.user_id,
+        DeviceBinding.user_id.in_(user.user_refs),
     )
     total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one()
     rows = (

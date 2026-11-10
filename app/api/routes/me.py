@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, Path
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentUser, get_current_user
@@ -21,6 +21,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["我的设备"])
 
 
+def _my_devices_stmt(user: CurrentUser):
+    """当前用户「领用中」的设备查询。
+
+    ``user_refs`` 同时包含 Casdoor 用户 UUID 与用户名：领用记录可能存的是
+    工号（管理员手工填写且后端未配置客户端凭据时无法反查为 UUID），
+    只按 Token 的 UUID 精确比较会把这类记录全部漏掉。
+    租户范围仍严格取服务端推导的 ``user.tenant_id``，不采信客户端传值。
+    """
+    return (
+        select(Device)
+        .join(DeviceAssignment, DeviceAssignment.device_id == Device.id)
+        .where(
+            DeviceAssignment.user_id.in_(user.user_refs),
+            DeviceAssignment.returned_at.is_(None),
+            Device.tenant_id == user.tenant_id,
+        )
+    )
+
+
 @router.get(
     "/my/devices",
     response_model=PageResult[DeviceOut],
@@ -32,23 +51,14 @@ async def my_devices(
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> PageResult:
-    stmt = (
-        select(Device)
-        .join(DeviceAssignment, DeviceAssignment.device_id == Device.id)
-        .options()
-        .where(
-            DeviceAssignment.user_id == user.user_id,
-            DeviceAssignment.returned_at.is_(None),
-            Device.tenant_id == user.tenant_id,
-        )
-    )
+    base = _my_devices_stmt(user)
+    total = db.execute(select(func.count()).select_from(base.subquery())).scalar_one()
     rows = (
-        db.execute(stmt.order_by(Device.id.desc()).limit(query.limit).offset(query.offset))
+        db.execute(base.order_by(Device.id.desc()).limit(query.limit).offset(query.offset))
         .unique()
         .scalars()
         .all()
     )
-    total = len(rows)
     return PageResult.build([DeviceOut(**device_service.build_device_out(row)) for row in rows], total, query)
 
 
@@ -65,7 +75,7 @@ async def my_device(
     assignment = db.execute(
         select(DeviceAssignment).where(
             DeviceAssignment.device_id == device_id,
-            DeviceAssignment.user_id == user.user_id,
+            DeviceAssignment.user_id.in_(user.user_refs),
             DeviceAssignment.returned_at.is_(None),
             DeviceAssignment.tenant_id == user.tenant_id,
         )

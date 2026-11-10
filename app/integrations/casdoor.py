@@ -324,20 +324,51 @@ class CasdoorClient:
             self._service_token_expires_at = now + expires_in
             return self._service_token
 
+    @staticmethod
+    def _unwrap_user(payload: Any) -> Optional[Dict[str, Any]]:
+        """兼容 Casdoor 的 ``{"status":"ok","data":{...}}`` 包装与裸用户对象。"""
+        if not isinstance(payload, dict) or payload.get("status") == "error":
+            return None
+        data = payload.get("data")
+        if isinstance(data, dict) and data and data.get("id"):
+            return data
+        if payload.get("id"):
+            return payload
+        return None
+
     async def get_user(self, owner: str, user_id_or_name: str) -> Optional[Dict[str, Any]]:
-        """按 owner + 用户 id/用户名查询 Casdoor 用户。"""
+        """按 owner + 用户 UUID / 用户名查询 Casdoor 用户。
+
+        ``/api/get-user`` 的 ``id`` 参数在多数版本里要求全限定名 ``owner/name``，
+        部分版本也接受用户 UUID；两种形式依次尝试。查询失败返回 ``None``，
+        由调用方决定是否按原值透传。
+        """
         service_token = await self.get_service_token()
         if not service_token:
             return None
-        try:
-            return await self._get_json(
-                "/api/get-user",
-                params={"owner": owner, "id": user_id_or_name},
-                headers={"Authorization": f"Bearer {service_token}"},
-            )
-        except CasdoorError as exc:
-            logger.warning("查询 Casdoor 用户失败：%s", exc)
+
+        value = (user_id_or_name or "").strip()
+        if not value:
             return None
+        candidates = [value]
+        qualified = f"{owner}/{value}"
+        if not value.startswith(f"{owner}/") and qualified not in candidates:
+            candidates.append(qualified)
+
+        for candidate in candidates:
+            try:
+                payload = await self._get_json(
+                    "/api/get-user",
+                    params={"owner": owner, "id": candidate},
+                    headers={"Authorization": f"Bearer {service_token}"},
+                )
+            except CasdoorError as exc:
+                logger.warning("查询 Casdoor 用户失败（id=%s）：%s", candidate, exc)
+                continue
+            user = self._unwrap_user(payload)
+            if user:
+                return user
+        return None
 
     # ------------------------------------------------------------------
     # HTTP helpers
