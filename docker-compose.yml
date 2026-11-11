@@ -52,7 +52,6 @@ services:
       CASDOOR_ADMIN_PERMISSIONS: ${CASDOOR_ADMIN_PERMISSIONS:-}
       CASDOOR_ADMIN_USERS: ${CASDOOR_ADMIN_USERS:-}
       CASDOOR_GLOBAL_ADMIN_ROLES: ${CASDOOR_GLOBAL_ADMIN_ROLES:-global_admin}
-      AUTH_KEY_SECRET: ${AUTH_KEY_SECRET:-please-change-this-to-a-long-random-secret}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
     ports:
       - "8000:8000"

@@ -1,6 +1,6 @@
 """设备凭证接口（README §6 POST /devices/{id}/credential/rotate）。
 
-AuthKey 明文仅在签发 / 轮换的响应中返回一次，数据库只保存 HMAC 摘要。
+轮换接口返回新签发的 AuthKey 明文，凭证历史仅返回版本和状态等元数据。
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ async def list_credentials(
     "/devices/{device_id}/credential/rotate",
     response_model=CredentialIssuedOut,
     summary="轮换 AuthKey",
-    description="撤销当前有效凭证并签发新版本；响应中的 AuthKey 明文仅此一次可见。",
+    description="撤销当前有效凭证并签发新版本，返回新 AuthKey 明文。",
 )
 async def rotate_credential(
     device_id: int = Path(ge=1),

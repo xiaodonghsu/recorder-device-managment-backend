@@ -24,7 +24,7 @@ from app.core.errors import (
     NotFoundError,
     ValidationError,
 )
-from app.core.security import generate_auth_key, hash_auth_key
+from app.core.security import generate_auth_key
 from app.db.models import (
     Device,
     DeviceAssignment,
@@ -107,10 +107,10 @@ def register_device(
 ) -> Tuple[Device, Optional[str]]:
     """设备入库。
 
-    流程：录入档案 → 生成或导入 AuthKey → 保存摘要 → 创建 device /
+    流程：录入档案 → 生成或导入 AuthKey → 保存明文 → 创建 device /
     device_credential / device_status → 记录 device_registered 事件。
 
-    返回 (设备, AuthKey 明文)。AuthKey 明文仅在系统生成时返回一次，
+    返回 (设备, AuthKey 明文)。入库响应仅在系统生成时返回明文，
     数据库只保存 HMAC 摘要。
     """
     existing = get_device_by_sn(db, payload.sn)
@@ -135,7 +135,7 @@ def register_device(
         plaintext = payload.auth_key or generate_auth_key()
         credential = DeviceCredential(
             device_id=device.id,
-            auth_key_hash=hash_auth_key(plaintext),
+            auth_key=plaintext,
             auth_key_version=1,
             status=CredentialStatus.ACTIVE.value,
             issued_at=_utcnow(),

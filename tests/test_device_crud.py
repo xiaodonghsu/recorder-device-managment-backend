@@ -35,12 +35,16 @@ def test_register_duplicate_sn_conflicts(client: TestClient, auth):
     assert response.json()["code"] == "conflict"
 
 
-def test_imported_authkey_is_accepted(client: TestClient, auth):
+def test_imported_authkey_is_accepted(client: TestClient, auth, session):
+    from app.db.models import DeviceCredential
+
     auth()
     response = register(client, "SN-IMPORT", auth_key="my-legacy-authkey-0001")
     assert response.status_code == 201
     # 导入的 AuthKey 不再回显
     assert response.json()["auth_key"] is None
+    credential = session.query(DeviceCredential).filter_by(device_id=response.json()["id"]).one()
+    assert credential.auth_key == "my-legacy-authkey-0001"
 
 
 def test_device_list_and_detail(client: TestClient, auth):
@@ -93,14 +97,13 @@ def test_registration_creates_credential_and_status_rows(client: TestClient, aut
     from app.db.models import DeviceCredential, DeviceStatus
 
     auth()
-    device_id = register(client, "SN-ROWS").json()["id"]
+    created = register(client, "SN-ROWS").json()
+    device_id = created["id"]
 
     credential = session.query(DeviceCredential).filter_by(device_id=device_id).one()
     assert credential.auth_key_version == 1
     assert credential.status == "active"
-    # 数据库不保存明文 AuthKey
-    assert "vhk_" not in credential.auth_key_hash
-    assert len(credential.auth_key_hash) == 64
+    assert credential.auth_key == created["auth_key"]
 
     status = session.query(DeviceStatus).filter_by(device_id=device_id).one()
     assert status.online is False

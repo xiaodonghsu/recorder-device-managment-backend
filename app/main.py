@@ -111,31 +111,6 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 for module in (auth, devices, bindings, credentials, me, tables):
     app.include_router(module.router, prefix=settings.api_prefix)
 
-
-# ---------------------------------------------------------------------------
-# 管理后台静态资源（frontend/ 目录）
-# ---------------------------------------------------------------------------
-def _mount_frontend() -> None:
-    """把 frontend/ 挂载到 /admin，便于单进程部署管理后台。"""
-    frontend_path = settings.frontend_path
-    if not frontend_path.is_dir():
-        logger.info("未找到管理后台目录 %s，跳过静态资源挂载", frontend_path)
-        return
-    try:
-        app.mount(
-            "/admin",
-            StaticFiles(directory=str(frontend_path), html=True),
-            name="admin",
-        )
-    except RuntimeError as exc:  # pragma: no cover - 目录不可读
-        logger.warning("管理后台静态资源挂载失败：%s", exc)
-        return
-    logger.info("管理后台已挂载：/admin → %s", frontend_path)
-
-
-_mount_frontend()
-
-
 @app.get("/healthz", tags=["运维"], summary="存活探针")
 async def healthz() -> dict:
     return {"status": "ok", "app": settings.app_name, "version": settings.app_version}

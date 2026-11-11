@@ -143,7 +143,8 @@ def test_my_devices_matches_employee_no(client: TestClient, auth):
     preferred_username（工号）才是业务唯一标识；name（姓名）只能用于展示。
     """
     auth("u-admin", is_admin=True)
-    device_id = client.post("/api/devices", json={"sn": "SN-ALIAS-1"}).json()["id"]
+    created = client.post("/api/devices", json={"sn": "SN-ALIAS-1"}).json()
+    device_id = created["id"]
     assigned = client.post(f"/api/devices/{device_id}/assign", json={"user_id": "JH000059"})
     assert assigned.status_code == 200, assigned.text
     assert assigned.json()["user_id"] == "JH000059"
@@ -161,6 +162,8 @@ def test_my_devices_matches_employee_no(client: TestClient, auth):
     body = listing.json()
     assert body["total"] == 1
     assert [item["id"] for item in body["items"]] == [device_id]
+    assert body["items"][0]["auth_key"] == created["auth_key"]
+    assert listing.headers["Cache-Control"] == "no-store"
     assert client.get(f"/api/my/devices/{device_id}").status_code == 200
 
     # 绑定关系必须沿用领用记录里的标识，否则组合外键 (assignment_id, device_id,

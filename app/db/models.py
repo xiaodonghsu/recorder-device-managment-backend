@@ -4,8 +4,9 @@
 
 - 主键统一 BIGINT UNSIGNED AUTO_INCREMENT；
 - 时间戳统一 DATETIME(3)（MySQL 使用 fsp=3 保留毫秒）；
-- 「当前有效记录唯一」约束使用 STORED 生成列 + UNIQUE 索引实现，
+- 「当前有效记录唯一」约束使用 VIRTUAL 生成列 + UNIQUE 索引实现，
   MySQL 8.0.16+ 与 SQLite 3.31+ 均支持，SQLAlchemy 通过 Computed 统一表达；
+  MySQL 的 STORED 生成列会限制其依赖列作为级联外键。
 - device_binding 通过组合外键 (assignment_id, device_id, user_id)
   引用 device_assignment，保证绑定员工与领用员工一致。
 
@@ -176,7 +177,8 @@ class DeviceCredential(Base):
         ForeignKey("device.id", ondelete="CASCADE"),
         nullable=False,
     )
-    auth_key_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    # 旧版凭证只有摘要，升级后需要补录原值或轮换。
+    auth_key: Mapped[Optional[str]] = mapped_column(String(128))
     auth_key_version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default=text("1")
     )
@@ -196,13 +198,12 @@ class DeviceCredential(Base):
     # UNIQUE 索引允许多个 NULL，因此天然保证「每台设备同时最多一个有效凭证」。
     active_device_id: Mapped[Optional[int]] = mapped_column(
         BigInteger().with_variant(mysql.BIGINT(unsigned=True), "mysql"),
-        Computed("CASE WHEN status = 'active' THEN device_id ELSE NULL END", persisted=True),
+        Computed("CASE WHEN status = 'active' THEN device_id ELSE NULL END", persisted=False),
     )
 
     __table_args__ = (
         UniqueConstraint("device_id", "auth_key_version", name="uk_credential_version"),
         UniqueConstraint("active_device_id", name="uk_credential_active"),
-        Index("idx_credential_hash", "auth_key_hash"),
     )
 
     device: Mapped["Device"] = relationship(back_populates="credential")
@@ -235,7 +236,7 @@ class DeviceAssignment(Base):
     # 生成列：未归还时等于 device_id，保证「一台设备同时只能分配给一个员工」
     current_device_id: Mapped[Optional[int]] = mapped_column(
         BigInteger().with_variant(mysql.BIGINT(unsigned=True), "mysql"),
-        Computed("CASE WHEN returned_at IS NULL THEN device_id ELSE NULL END", persisted=True),
+        Computed("CASE WHEN returned_at IS NULL THEN device_id ELSE NULL END", persisted=False),
     )
 
     __table_args__ = (
@@ -283,11 +284,11 @@ class DeviceBinding(Base):
 
     active_device_id: Mapped[Optional[int]] = mapped_column(
         BigInteger().with_variant(mysql.BIGINT(unsigned=True), "mysql"),
-        Computed("CASE WHEN status = 'active' THEN device_id ELSE NULL END", persisted=True),
+        Computed("CASE WHEN status = 'active' THEN device_id ELSE NULL END", persisted=False),
     )
     active_assignment_id: Mapped[Optional[int]] = mapped_column(
         BigInteger().with_variant(mysql.BIGINT(unsigned=True), "mysql"),
-        Computed("CASE WHEN status = 'active' THEN assignment_id ELSE NULL END", persisted=True),
+        Computed("CASE WHEN status = 'active' THEN assignment_id ELSE NULL END", persisted=False),
     )
 
     __table_args__ = (

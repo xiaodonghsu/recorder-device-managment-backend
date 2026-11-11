@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""数据库初始化脚本。
+"""数据库初始化与旧版凭证表升级脚本。
 
 用法：
 
@@ -42,7 +42,7 @@ def main() -> int:
     print(f"目标数据库：{url.split('@')[-1]}")
 
     if "mysql" in url:
-        print("提示：MySQL 8.0.16+ 支持 CHECK 约束与 STORED 生成列，版本过低请升级。")
+        print("提示：MySQL 8.0.16+ 支持 CHECK 约束与生成列索引，版本过低请升级。")
 
     engine = get_engine() if url == settings.database_url else create_engine_for_url(url)
     init_db(engine, drop_first=args.drop)

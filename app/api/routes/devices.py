@@ -78,7 +78,7 @@ async def list_devices(
     "/devices/batch",
     response_model=DeviceBatchResult,
     summary="设备批量入库",
-    description="批量登记设备，单条失败不影响其余设备；系统生成的 AuthKey 明文仅在本次响应返回。",
+    description="批量登记设备，单条失败不影响其余设备；返回系统生成的 AuthKey 明文。",
 )
 async def batch_register_devices(
     payload: DeviceBatchCreate,
@@ -101,7 +101,7 @@ async def batch_register_devices(
     response_model=DeviceCreatedOut,
     status_code=201,
     summary="设备入库",
-    description="登记设备档案、签发 AuthKey（只保存摘要）并记录 device_registered 事件。",
+    description="登记设备档案、以明文保存 AuthKey 并记录 device_registered 事件。",
 )
 async def register_device(
     payload: DeviceCreate,

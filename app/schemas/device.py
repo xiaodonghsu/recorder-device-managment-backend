@@ -26,7 +26,7 @@ class DeviceCreate(BaseModel):
     auth_key: Optional[str] = Field(
         default=None,
         max_length=128,
-        description="导入已有 AuthKey；不传则由系统生成高强度随机值（明文仅返回一次）",
+        description="导入已有 AuthKey；不传则由系统生成高强度随机值",
     )
     tenant_id: Optional[str] = Field(
         default=None, max_length=64, description="目标企业；管理员不填则归属自身企业"
@@ -79,7 +79,7 @@ class DeviceBatchResultItem(BaseModel):
     sn: str
     success: bool
     device_id: Optional[int] = None
-    auth_key: Optional[str] = Field(default=None, description="系统生成的 AuthKey 明文，仅本次返回")
+    auth_key: Optional[str] = Field(default=None, description="系统生成的 AuthKey 明文")
     error: Optional[str] = None
 
 
@@ -135,10 +135,10 @@ class CredentialOut(BaseModel):
 
 
 class CredentialIssuedOut(BaseModel):
-    """凭证签发结果，包含一次性 AuthKey 明文。"""
+    """凭证签发结果，包含新 AuthKey 明文。"""
 
     device_id: int
-    auth_key: str = Field(description="AuthKey 明文，仅在本次响应返回，数据库只保存摘要")
+    auth_key: str = Field(description="新签发的 AuthKey 明文")
     auth_key_version: int
     issued_at: datetime
     expires_at: Optional[datetime] = None
@@ -173,6 +173,14 @@ class DeviceOut(BaseModel):
     status: Optional[DeviceStatusOut] = None
 
 
+class MyDeviceOut(DeviceOut):
+    """员工领用列表中的设备信息。"""
+
+    auth_key: Optional[str] = Field(
+        description="当前有效的 AuthKey 明文，缺少可用凭证时为 null"
+    )
+
+
 class DeviceListItem(DeviceOut):
     """设备列表项（在详情基础上补充当前绑定信息）。"""
 
@@ -180,9 +188,9 @@ class DeviceListItem(DeviceOut):
 
 
 class DeviceCreatedOut(DeviceOut):
-    """设备入库结果，含一次性 AuthKey 明文。"""
+    """设备入库结果，包含系统生成的 AuthKey 明文。"""
 
-    auth_key: Optional[str] = Field(default=None, description="系统生成的 AuthKey 明文，仅本次返回")
+    auth_key: Optional[str] = Field(default=None, description="系统生成的 AuthKey 明文")
 
 
 class DeviceEventOut(BaseModel):

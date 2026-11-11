@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
 from app.core.enums import CredentialStatus, LifecycleStatus  # noqa: E402
-from app.core.security import generate_auth_key, hash_auth_key  # noqa: E402
+from app.core.security import generate_auth_key  # noqa: E402
 from app.db.models import (  # noqa: E402
     Base,
     Device,
@@ -121,7 +121,7 @@ def main() -> int:
             # 设备凭证
             credential = DeviceCredential(
                 device_id=device.id,
-                auth_key_hash=hash_auth_key(generate_auth_key()),
+                auth_key=generate_auth_key(),
                 auth_key_version=1,
                 status=CredentialStatus.ACTIVE.value,
                 issued_at=created_at,

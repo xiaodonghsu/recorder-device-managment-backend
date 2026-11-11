@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Path
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, Path, Response
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentUser, get_current_user
 from app.core.config import settings
-from app.db.models import Device, DeviceAssignment
+from app.db.models import Device, DeviceAssignment, DeviceCredential
 from app.db.session import get_db
 from app.schemas.common import PageQuery, PageResult
-from app.schemas.device import DeviceOut
+from app.schemas.device import DeviceOut, MyDeviceOut
 from app.services import device_service
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ def _my_devices_stmt(user: CurrentUser):
         .where(
             DeviceAssignment.user_id.in_(user.user_refs),
             DeviceAssignment.returned_at.is_(None),
+            DeviceAssignment.tenant_id == user.tenant_id,
             Device.tenant_id == user.tenant_id,
         )
     )
@@ -42,24 +44,37 @@ def _my_devices_stmt(user: CurrentUser):
 
 @router.get(
     "/my/devices",
-    response_model=PageResult[DeviceOut],
+    response_model=PageResult[MyDeviceOut],
     summary="我领用的设备",
-    description="返回当前用户领用中（含已绑定）的设备列表。",
+    description="返回当前用户领用中的设备（含已绑定）及其当前有效的 AuthKey。",
 )
 async def my_devices(
+    response: Response,
     query: PageQuery = Depends(),
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
-) -> PageResult:
+) -> PageResult[MyDeviceOut]:
     base = _my_devices_stmt(user)
     total = db.execute(select(func.count()).select_from(base.subquery())).scalar_one()
-    rows = (
-        db.execute(base.order_by(Device.id.desc()).limit(query.limit).offset(query.offset))
-        .unique()
-        .scalars()
-        .all()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    stmt = (
+        base.add_columns(DeviceCredential.auth_key)
+        .outerjoin(
+            DeviceCredential,
+            (DeviceCredential.active_device_id == Device.id)
+            & or_(DeviceCredential.expires_at.is_(None), DeviceCredential.expires_at > now),
+        )
+        .order_by(Device.id.desc())
+        .limit(query.limit)
+        .offset(query.offset)
     )
-    return PageResult.build([DeviceOut(**device_service.build_device_out(row)) for row in rows], total, query)
+    rows = db.execute(stmt).unique().all()
+    items = [
+        MyDeviceOut(**device_service.build_device_out(device), auth_key=auth_key)
+        for device, auth_key in rows
+    ]
+    response.headers["Cache-Control"] = "no-store"
+    return PageResult[MyDeviceOut].build(items, total, query)
 
 
 @router.get(

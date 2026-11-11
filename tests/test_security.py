@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
+import pytest
 from fastapi.testclient import TestClient
 
 from app.db.models import DeviceBinding, DeviceCredential
@@ -59,23 +62,20 @@ def test_global_admin_sees_all_tenants(client: TestClient, auth):
     assert client.get("/api/devices").json()["total"] == 1
 
 
-def test_auth_key_never_stored_in_plaintext(client: TestClient, auth, session):
+def test_admin_listings_omit_auth_key(client: TestClient, auth):
     auth()
     created = client.post("/api/devices", json={"sn": "SN-K-1"}).json()
-    plaintext = created["auth_key"]
-
-    credential = session.query(DeviceCredential).filter_by(device_id=created["id"]).one()
-    assert plaintext not in credential.auth_key_hash
-    assert len(credential.auth_key_hash) == 64
-
-    # 凭证接口不返回明文
     listed = client.get(f"/api/devices/{created['id']}/credential").json()
     assert all("auth_key" not in item for item in listed)
+    assert "auth_key" not in client.get("/api/devices").json()["items"][0]
 
 
 def test_credential_rotation(client: TestClient, auth, session):
     auth()
     device_id = client.post("/api/devices", json={"sn": "SN-K-2"}).json()["id"]
+    assert client.post(
+        f"/api/devices/{device_id}/assign", json={"user_id": "emp-001"}
+    ).status_code == 200
 
     response = client.post(f"/api/devices/{device_id}/credential/rotate")
     assert response.status_code == 200, response.text
@@ -89,6 +89,38 @@ def test_credential_rotation(client: TestClient, auth, session):
     assert len(active) == 1
     assert active[0]["auth_key_version"] == 2
 
+    auth("emp-001", is_admin=False)
+    assert client.get("/api/my/devices").json()["items"][0]["auth_key"] == body["auth_key"]
+
+    auth("emp-001", tenant_id="globex", is_admin=False)
+    assert client.get("/api/my/devices").json()["items"] == []
+
+    auth()
+    assert client.post(f"/api/devices/{device_id}/credential/revoke").status_code == 200
+    auth("emp-001", is_admin=False)
+    assert client.get("/api/my/devices").json()["items"][0]["auth_key"] is None
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["expired", "legacy"])
+def test_my_devices_keeps_device_without_usable_key(client: TestClient, auth, session, legacy):
+    auth()
+    device_id = client.post("/api/devices", json={"sn": "SN-K-OLD"}).json()["id"]
+    assert client.post(
+        f"/api/devices/{device_id}/assign", json={"user_id": "emp-001"}
+    ).status_code == 200
+
+    credential = session.query(DeviceCredential).filter_by(device_id=device_id).one()
+    if legacy:
+        credential.auth_key = None
+    else:
+        credential.expires_at = datetime(2000, 1, 1)
+    session.commit()
+
+    auth("emp-001", is_admin=False)
+    body = client.get("/api/my/devices").json()
+    assert body["total"] == 1
+    assert body["items"][0]["auth_key"] is None
+
 
 def test_only_one_active_credential_per_device(client: TestClient, auth, session):
     """数据库层保证「每台设备同时最多一个有效凭证」。"""
@@ -100,7 +132,7 @@ def test_only_one_active_credential_per_device(client: TestClient, auth, session
     session.add(
         DeviceCredential(
             device_id=device_id,
-            auth_key_hash="x" * 64,
+            auth_key="x" * 64,
             auth_key_version=99,
             status="active",
         )

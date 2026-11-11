@@ -49,7 +49,7 @@ backend/
 │   │   ├── config.py           # 配置中心（环境变量 / .env）
 │   │   ├── enums.py            # 生命周期状态、事件类型、状态机规则
 │   │   ├── errors.py           # 统一异常体系（错误码 ↔ HTTP 状态码）
-│   │   └── security.py         # AuthKey 生成、HMAC-SHA256 摘要、常量时间比对
+│   │   └── security.py         # AuthKey 生成与格式校验
 │   ├── db/
 │   │   ├── models.py           # 6 张表的 ORM 定义（严格对齐 README §4）
 │   │   └── session.py          # 引擎 / 会话 / 事务依赖
@@ -68,22 +68,6 @@ backend/
 ├── requirements.txt
 └── .env.example
 ```
-
-### 2.1 管理后台静态托管
-
-服务启动时会把项目根目录的 `frontend/` 挂载到 `/admin`：
-
-```bash
-python -m uvicorn app.main:app --reload --port 8000
-# 管理后台 → http://127.0.0.1:8000/admin/
-```
-
-| 配置项 | 默认值 | 说明 |
-|---|---|---|
-| `SERVE_FRONTEND` | `true` | 是否托管管理后台静态资源 |
-| `FRONTEND_DIR` | 空 | 静态目录绝对路径，留空则用项目根目录下的 `frontend/` |
-
-目录不存在时只打一条 INFO 日志跳过挂载，不影响接口服务。
 
 ### 2.2 生产部署（nginx 同源代理）
 
@@ -104,7 +88,7 @@ CORS_ORIGINS=https://office.uassist.cn:40000
 nginx 配置样例见 [`../frontend/nginx.conf.example`](../frontend/nginx.conf.example)。
 
 > ⚠️ **Windows / Git Bash 陷阱**：直接执行
-> `API_PREFIX=/voicehub-api python -m uvicorn ...` 时，MSYS 会把以 `/` 开头的值
+> `API_PREFIX=/voicehub-api uv run -m uvicorn ...` 时，MSYS 会把以 `/` 开头的值
 > 自动转换成 Windows 绝对路径（`C:/Program Files/Git/voicehub-api`），
 > 导致所有接口挂在错误路径上、服务能起但接口全 404。
 > **请写进 `backend/.env`**，或先 `export MSYS_NO_PATHCONV=1`。
@@ -118,23 +102,23 @@ nginx 配置样例见 [`../frontend/nginx.conf.example`](../frontend/nginx.conf.
 cd backend
 
 # 1. 安装依赖
-python -m pip install -r requirements.txt
+uv add -r requirements.txt
 
 # 2. 配置环境变量
 cp .env.example .env
-#    至少填写 CASDOOR_CLIENT_ID / CASDOOR_CLIENT_SECRET / AUTH_KEY_SECRET
+#    至少填写 CASDOOR_CLIENT_ID / CASDOOR_CLIENT_SECRET
 
 # 3. 初始化数据库（开发环境用 SQLite 会自动建表，此步可跳过）
-python scripts/init_db.py
+uv run scripts/init_db.py
 
 # 4. 启动
-python -m uvicorn app.main:app --reload --port 8000
+uv run -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8040
 ```
 
 启动后：
 
-- 接口文档：<http://127.0.0.1:8000/docs>
-- OpenAPI：<http://127.0.0.1:8000/openapi.json>
+- 接口文档：<http://127.0.0.1:8040/docs>
+- OpenAPI：<http://127.0.0.1:8040/openapi.json>
 - 健康检查：`/healthz`（存活）、`/readyz`（数据库连通性）
 
 ### 切换到 MySQL
@@ -149,10 +133,21 @@ APP_ENV=production
 
 ```bash
 mysql -u root -p < sql/schema.mysql.sql     # 方式一：直接执行 SQL
-python scripts/init_db.py                     # 方式二：由 ORM 建表
+uv run scripts/init_db.py                     # 方式二：由 ORM 建表
 ```
 
 > MySQL 需 **8.0.16 及以上**，否则 `CHECK` 约束不会被执行。
+
+### 升级旧版设备凭证表
+
+已有数据库在升级时先停止旧版服务，再使用目标数据库的配置执行 `uv run scripts/init_db.py`，随后启动新版。
+脚本保留设备、凭证版本和状态，移除旧的摘要列，并为旧凭证留空 `auth_key`。
+开发环境启动时会自动执行同一升级。
+
+旧 HMAC 摘要无法还原原始 AuthKey。若已掌握录音卡当前使用的原始密钥，
+可按凭证记录 ID 将其补录到 `device_credential.auth_key` 中对应的有效凭证。
+也可通过轮换接口签发新密钥，再将同一个新密钥同步到录音卡。
+补录或轮换前，旧凭证在领用列表中返回 `auth_key: null`。
 > ORM 与 SQL 脚本结构等价：主键 `BIGINT UNSIGNED`、时间戳 `DATETIME(3)`、
 > `updated_at ... ON UPDATE CURRENT_TIMESTAMP(3)`。
 
@@ -214,7 +209,7 @@ CASDOOR_APPLICATION=voicehub
 | 环境 | 回调地址 |
 |---|---|
 | 生产（nginx） | `https://office.uassist.cn:40000/voicehub/` |
-| 本地（后端自带托管） | `http://127.0.0.1:8000/admin/` |
+| 本地（后端自带托管） | `http://127.0.0.1:8040/admin/` |
 
 未登记时跳转登录页会提示「重定向 URI 在许可跳转列表中未找到」。
 
@@ -324,7 +319,7 @@ CASDOOR_APPLICATION=voicehub
 
 ```bash
 # ① 带上 Access Token 查询自己的身份与判定依据
-curl -H "Authorization: Bearer <token>" http://127.0.0.1:8000/api/my/profile
+curl -H "Authorization: Bearer <token>" http://127.0.0.1:8040/api/my/profile
 ```
 
 响应中的 `roles` / `groups` / `permissions` 是 Casdoor 返回的原始名称，
@@ -364,7 +359,7 @@ curl -H "Authorization: Bearer <token>" http://127.0.0.1:8000/api/my/profile
 也可以用命令行自查脚本（无需启动服务）：
 
 ```bash
-python scripts/whoami.py <access_token>
+uv run scripts/whoami.py <access_token>
 ```
 
 输出身份信息、各判定项命中情况与可行的授权方式。
@@ -404,7 +399,7 @@ python scripts/whoami.py <access_token>
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
 | GET | `/api/devices` | A | 设备列表（分页；关键字 / 状态 / 型号 / 领用 / 绑定筛选） |
-| POST | `/api/devices` | A | 设备入库，返回一次性 AuthKey 明文 |
+| POST | `/api/devices` | A | 设备入库，返回系统生成的 AuthKey 明文 |
 | POST | `/api/devices/batch` | A | 批量入库（≤1000 条，单条失败不影响其余） |
 | GET | `/api/devices/{id}` | A | 设备详情 |
 | PUT | `/api/devices/{id}` | A | 更新档案（SN 不可改） |
@@ -433,14 +428,14 @@ python scripts/whoami.py <access_token>
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
 | GET | `/api/devices/{id}/credential` | A | 凭证版本历史（不含明文） |
-| POST | `/api/devices/{id}/credential/rotate` | A | 轮换 AuthKey，返回新明文（仅此一次） |
+| POST | `/api/devices/{id}/credential/rotate` | A | 轮换 AuthKey，返回新明文 |
 | POST | `/api/devices/{id}/credential/revoke` | A | 撤销当前凭证 |
 
 ### 5.4 员工自助与认证
 
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
-| GET | `/api/my/devices` | U | 我领用的设备 |
+| GET | `/api/my/devices` | U | 我领用的设备，`items[].auth_key` 为当前有效的 AuthKey 明文，无可用凭证时为 `null` |
 | GET | `/api/my/devices/{id}` | U | 我的设备详情 |
 | GET | `/api/my/profile` | U | 当前登录身份（租户、角色、是否管理员） |
 | GET | `/api/auth/config` | 公开 | Casdoor 登录参数（授权地址、client_id 等） |
@@ -492,7 +487,7 @@ python scripts/whoami.py <access_token>
    - `device_status` 表已建好，但**没有状态上报接口**，电量 / 充电 / 录音状态
      只能由后续接入固件或第三方同步时填充（服务层已预留
      `device_service` 中的状态读写逻辑）。
-   - AuthKey 当前仅用于入库时生成、轮换与撤销，作为设备独立凭证存档。
+   - 手机 APP 从领用列表取得 AuthKey，用于与录音卡认证并建立连接。
 2. **首次绑定即激活设备**：设备在 `registered` 状态下被员工首次绑定时，
    自动流转为 `active` 并写入 `activated_at` 与 `device_activated` 事件。
    README §5.1 只规定了入库后为 `registered`，未定义激活时机，此处按业务直觉实现。
@@ -508,7 +503,7 @@ python scripts/whoami.py <access_token>
 |---|---|---|
 | 1 | SN 全局唯一，不允许员工修改 | `uk_device_sn` 唯一索引 + `DeviceUpdate` 不含 SN |
 | 2 | Bluetooth Name 不唯一，不作为认证依据 | 仅作展示字段，不参与任何鉴权 |
-| 3 | AuthKey 不明文存储，不返回给普通 APP | HMAC-SHA256 摘要入库；明文仅入库 / 轮换响应一次性返回 |
+| 3 | 手机 APP 获取领用设备的 AuthKey | 明文存入 `device_credential.auth_key`，领用列表按员工与租户授权返回当前有效凭证 |
 | 4 | APP 用户身份使用 Casdoor Token | `get_current_user` 依赖强制 Bearer 校验 |
 | 5 | 设备身份使用 AuthKey | `device_credential` 独立凭证表，与用户令牌完全分离 |
 | 6 | 只有当前领用员工可以绑定 | `bind_device` 校验 `assignment.user_id` |
@@ -549,7 +544,7 @@ python scripts/whoami.py <access_token>
 
 ```bash
 cd backend
-python -m pytest              # 75 passed
+uv run -m pytest              # 75 passed
 ```
 
 覆盖范围：
@@ -560,7 +555,7 @@ python -m pytest              # 75 passed
 | `tests/test_assignment.py` | 领用、重复领用、禁用设备不可领用、归还、归还后重新分配、归还即失权 |
 | `tests/test_employee_lookup.py` | 工号存在性校验：命中规范化、不存在/跨组织/禁用拒绝、查询不可用降级、required/off 策略、UUID 输入拒绝 |
 | `tests/test_binding.py` | 绑定、非领用人拒绝、重复绑定、禁用设备不可绑定、昵称、解绑、绑定历史 |
-| `tests/test_security.py` | 未认证 / 非管理员、跨租户隔离、AuthKey 不落库、凭证与绑定唯一约束、SN 不可变 |
+| `tests/test_security.py` | 未认证 / 非管理员、跨租户隔离、AuthKey 返回范围、凭证与绑定唯一约束、SN 不可变 |
 | `tests/test_casdoor.py` | Casdoor userinfo / introspect 解析、管理员判定、禁用账号拒绝、登录配置 |
 | `tests/test_tables.py` | 表格级接口：五张表的跨设备列表与筛选、员工清单、概览聚合、租户隔离与管理员拦截 |
 | `tests/test_config.py` | 配置中心：`api_prefix` 规范化与 Windows 路径拦截、静态目录推导 |
@@ -574,7 +569,6 @@ python -m pytest              # 75 passed
 生产上线前需确认：
 
 - [ ] `.env` 中 `APP_ENV=production`
-- [ ] `AUTH_KEY_SECRET` 替换为 32 位以上随机值（否则启动日志给出告警）
 - [ ] `CASDOOR_CLIENT_ID` / `CASDOOR_CLIENT_SECRET` 已配置（introspect 与严格查询身份所需）
 - [ ] `CASDOOR_VERIFY_EMPLOYEE` 已按一致性要求选定 `optional` / `required`；容器部署时
       已在 `docker-compose.yml` 透传

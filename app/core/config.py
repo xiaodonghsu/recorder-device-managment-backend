@@ -80,7 +80,6 @@ class Settings(BaseSettings):
     casdoor_admin_users: str = ""
 
     # ---------------- 设备凭证 ----------------
-    auth_key_secret: str = "please-change-this-to-a-long-random-secret"
     auth_key_default_ttl_days: int = 0
     device_online_timeout_seconds: int = 300
 
@@ -193,8 +192,6 @@ class Settings(BaseSettings):
         """返回生产环境下的风险项清单（空列表表示安全）。"""
         warnings: List[str] = []
         if self.app_env.lower() == "production":
-            if self.auth_key_secret.startswith("please-change") or len(self.auth_key_secret) < 32:
-                warnings.append("AUTH_KEY_SECRET 未设置或过短，生产环境必须使用 32 位以上随机值")
             if not self.casdoor_has_client_credentials:
                 warnings.append("CASDOOR_CLIENT_ID / CASDOOR_CLIENT_SECRET 未配置，Token 校验将降级为 userinfo 模式")
             if self.casdoor_base_url.startswith("http://"):

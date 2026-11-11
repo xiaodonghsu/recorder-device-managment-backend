@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Generator
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -38,7 +38,11 @@ def create_engine_for_url(database_url: str, *, echo: bool | None = None) -> Eng
     SQLite 与 MySQL 的连接池参数不同，此处统一处理。
     """
     is_sqlite = database_url.startswith("sqlite")
-    kwargs: dict = {"echo": settings.db_echo if echo is None else echo, "future": True}
+    kwargs: dict = {
+        "echo": settings.db_echo if echo is None else echo,
+        "future": True,
+        "hide_parameters": True,
+    }
 
     if is_sqlite:
         _ensure_sqlite_dir(database_url)
@@ -105,13 +109,29 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db(engine: Engine | None = None, *, drop_first: bool = False) -> None:
-    """建表（可选先删表）。"""
+    """建表并升级旧版凭证表（可选先删表）。"""
     target = engine or get_engine()
     if drop_first:
         logger.warning("即将删除所有表并重建（drop_first=True）")
         Base.metadata.drop_all(target)
     Base.metadata.create_all(target)
+    _upgrade_credential_table(target)
     logger.info("数据库表结构已就绪")
+
+
+def _upgrade_credential_table(engine: Engine) -> None:
+    """迁移旧凭证表，保留版本记录并为无法还原的明文留空。"""
+    with engine.begin() as conn:
+        columns = {column["name"] for column in inspect(conn).get_columns("device_credential")}
+        if "auth_key_hash" not in columns:
+            return
+
+        if "auth_key" not in columns:
+            conn.exec_driver_sql("ALTER TABLE device_credential ADD COLUMN auth_key VARCHAR(128)")
+        if conn.dialect.name == "sqlite":
+            conn.exec_driver_sql("DROP INDEX IF EXISTS idx_credential_hash")
+        conn.exec_driver_sql("ALTER TABLE device_credential DROP COLUMN auth_key_hash")
+        logger.info("已升级设备凭证表，旧凭证的 AuthKey 需要补录或轮换")
 
 
 def reset_engine() -> None:

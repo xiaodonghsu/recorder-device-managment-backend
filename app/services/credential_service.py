@@ -1,6 +1,6 @@
 """设备凭证（AuthKey）服务（README §3.2 / §7.3）。
 
-- AuthKey 只在签发时以明文出现一次，数据库仅保存 HMAC-SHA256 摘要；
+- AuthKey 以明文保存，供领用员工连接录音卡；
 - 支持轮换：撤销旧凭证 → 签发新版本，历史凭证保留可追溯；
 - 每台设备同时最多一个有效凭证（由 uk_credential_active 生成列唯一索引保证）。
 """
@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.core.enums import CredentialStatus, EventType
 from app.core.errors import NotFoundError
-from app.core.security import generate_auth_key, hash_auth_key
+from app.core.security import generate_auth_key
 from app.db.models import DeviceCredential
 from app.services.device_service import get_device_row
 from app.services.event_service import record_event
@@ -74,7 +74,7 @@ def rotate_credential(
 ) -> Tuple[DeviceCredential, str]:
     """轮换 AuthKey（README §6 POST /devices/{id}/credential/rotate）。
 
-    返回 (新凭证, 新 AuthKey 明文)。明文仅本次响应返回。
+    返回 (新凭证, 新 AuthKey 明文)。
     """
     device = get_device_row(db, device_id, tenant_scope, with_status=False)
 
@@ -99,7 +99,7 @@ def rotate_credential(
         plaintext = generate_auth_key()
         credential = DeviceCredential(
             device_id=device.id,
-            auth_key_hash=hash_auth_key(plaintext),
+            auth_key=plaintext,
             auth_key_version=next_version,
             status=CredentialStatus.ACTIVE.value,
             issued_at=_utcnow(),

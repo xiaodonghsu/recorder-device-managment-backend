@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS device (
 CREATE TABLE IF NOT EXISTS device_credential (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     device_id BIGINT UNSIGNED NOT NULL,
-    auth_key_hash VARCHAR(128) NOT NULL,
+    auth_key VARCHAR(128) DEFAULT NULL,
     auth_key_version INT NOT NULL DEFAULT 1,
     status VARCHAR(20) NOT NULL DEFAULT 'active',
 
@@ -58,15 +58,14 @@ CREATE TABLE IF NOT EXISTS device_credential (
     active_device_id BIGINT UNSIGNED
         GENERATED ALWAYS AS (
             CASE WHEN status = 'active' THEN device_id ELSE NULL END
-        ) STORED,
+        ) VIRTUAL,
 
     UNIQUE KEY uk_credential_version (device_id, auth_key_version),
     UNIQUE KEY uk_credential_active (active_device_id),
-    KEY idx_credential_hash (auth_key_hash),
 
     CONSTRAINT fk_credential_device
         FOREIGN KEY (device_id) REFERENCES device(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='设备认证凭证（只存 HMAC 摘要）';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='设备认证凭证';
 
 -- ---------------------------------------------------------------------------
 -- 3.3 device_assignment：设备领用表
@@ -85,7 +84,7 @@ CREATE TABLE IF NOT EXISTS device_assignment (
     current_device_id BIGINT UNSIGNED
         GENERATED ALWAYS AS (
             CASE WHEN returned_at IS NULL THEN device_id ELSE NULL END
-        ) STORED,
+        ) VIRTUAL,
 
     UNIQUE KEY uk_assignment_current (current_device_id),
     UNIQUE KEY uk_assignment_relation (id, device_id, user_id),
@@ -112,12 +111,12 @@ CREATE TABLE IF NOT EXISTS device_binding (
     active_device_id BIGINT UNSIGNED
         GENERATED ALWAYS AS (
             CASE WHEN status = 'active' THEN device_id ELSE NULL END
-        ) STORED,
+        ) VIRTUAL,
 
     active_assignment_id BIGINT UNSIGNED
         GENERATED ALWAYS AS (
             CASE WHEN status = 'active' THEN assignment_id ELSE NULL END
-        ) STORED,
+        ) VIRTUAL,
 
     UNIQUE KEY uk_binding_device (active_device_id),
     UNIQUE KEY uk_binding_assignment (active_assignment_id),
