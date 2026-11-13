@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from sqlalchemy import func, or_, select
 
+from app.core.config import settings
 from app.core.enums import ASSIGNABLE_LIFECYCLE_STATUSES, LifecycleStatus
 from app.db.models import (
     Device,
@@ -31,6 +32,7 @@ from app.db.models import (
     DeviceStatus,
 )
 from app.schemas.common import PageQuery, PageResult
+from app.schemas.device import build_status_out
 from app.schemas.table import (
     AssignmentRow,
     BindingRow,
@@ -261,7 +263,23 @@ def list_statuses(
     stmt = _tenant_filter(stmt, tenant_scope, Device.tenant_id)
 
     if online is not None:
-        stmt = stmt.where(DeviceStatus.online.is_(online))
+        # 在线是派生值：APP 掉线后库里的 online 可能仍为 true，必须同时
+        # 校验 last_seen_at 未超过 DEVICE_ONLINE_TIMEOUT_SECONDS。
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+            seconds=settings.device_online_timeout_seconds
+        )
+        if online:
+            stmt = stmt.where(
+                DeviceStatus.online.is_(True), DeviceStatus.last_seen_at >= cutoff
+            )
+        else:
+            stmt = stmt.where(
+                or_(
+                    DeviceStatus.online.is_(False),
+                    DeviceStatus.last_seen_at.is_(None),
+                    DeviceStatus.last_seen_at < cutoff,
+                )
+            )
     if lifecycle_status:
         stmt = stmt.where(Device.lifecycle_status == lifecycle_status)
 
@@ -282,7 +300,7 @@ def list_statuses(
                 device_model=model,
                 tenant_id=tenant_id,
                 lifecycle_status=lifecycle_status,
-                online=bool(status.online),
+                online=build_status_out(status).online,
                 battery_level=status.battery_level,
                 charging=bool(status.charging),
                 recording=bool(status.recording),
@@ -478,7 +496,10 @@ def overview_stats(db, tenant_scope: Optional[Sequence[str]]) -> OverviewStats:
     status_stmt = _tenant_filter(status_stmt, tenant_scope, Device.tenant_id)
     statuses = db.execute(status_stmt).scalars().all()
 
-    online_devices = sum(1 for s in statuses if s.online)
+    status_now = datetime.now(timezone.utc).replace(tzinfo=None)
+    online_devices = sum(
+        1 for s in statuses if build_status_out(s, now=status_now).online
+    )
     charging_devices = sum(1 for s in statuses if s.charging)
     recording_devices = sum(1 for s in statuses if s.recording)
     battery_values = [s.battery_level for s in statuses if s.battery_level is not None]

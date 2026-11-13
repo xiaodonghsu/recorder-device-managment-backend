@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import List, Optional
+from datetime import datetime, timezone
+from typing import Any, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -118,6 +118,83 @@ class DeviceStatusOut(BaseModel):
     last_seen_at: Optional[datetime] = None
     last_sync_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+
+def to_naive_utc(value: Optional[datetime]) -> Optional[datetime]:
+    """把客户端 / ORM 时间统一成 naive UTC（与 MySQL DATETIME 语义一致）。
+
+    APP 上报的时间可能带 ``Z`` 或时区偏移；数据库与既有接口一律使用不带
+    时区后缀的 UTC 字符串，因此在服务层入口与输出组装处各做一次归一化。
+    """
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+def build_status_out(status: Any, *, now: Optional[datetime] = None) -> DeviceStatusOut:
+    """组装状态输出，``online`` 由服务端按心跳超时裁决。
+
+    APP 被杀进程 / 开飞行模式时不会发「离线」事件，仅靠上报写入的
+    ``device_status.online`` 会让管理后台永远显示在线。所以所有读取路径
+    （设备详情、我的设备、状态端点、表格列表）统一走本函数：
+    只有在库里标记为在线、且 ``last_seen_at`` 未超过
+    ``DEVICE_ONLINE_TIMEOUT_SECONDS`` 时才视为在线。
+    """
+    from app.core.config import settings
+
+    current = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    last_seen = to_naive_utc(status.last_seen_at)
+    online = (
+        bool(status.online)
+        and last_seen is not None
+        and (current - last_seen).total_seconds() <= settings.device_online_timeout_seconds
+    )
+    return DeviceStatusOut(
+        device_id=status.device_id,
+        online=online,
+        battery_level=status.battery_level,
+        charging=bool(status.charging),
+        recording=bool(status.recording),
+        last_seen_at=last_seen,
+        last_sync_at=to_naive_utc(status.last_sync_at),
+        updated_at=to_naive_utc(status.updated_at),
+    )
+
+
+class DeviceStatusReport(BaseModel):
+    """手机 APP 上报的设备状态快照（README §5.4 / APP 对接说明 §6.3）。
+
+    注意这是「员工代报」，不是设备身份认证：服务端校验当前领用与有效绑定。
+    ``extra="forbid"`` 明确拒绝客户端传 ``online`` / ``updated_at``，
+    这两个字段一律由服务端裁决。未传的可选字段保留上次的值。
+    """
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    sampled_at: datetime = Field(
+        description="采集时刻；ISO 8601，可带 Z 或时区偏移，无后缀按 UTC 解释"
+    )
+    connected: bool = Field(description="APP 与录音卡当前是否保持蓝牙连接")
+    battery_level: Optional[int] = Field(
+        default=None, ge=0, le=100, description="电量百分比；不传保留旧值，传 null 表示本次读不到"
+    )
+    charging: Optional[bool] = Field(default=None, description="不传保留旧值")
+    recording: Optional[bool] = Field(default=None, description="不传保留旧值")
+    last_seen_at: Optional[datetime] = Field(
+        default=None, description="最近一次与设备成功通信；不传时由 connected 与 sampled_at 推导"
+    )
+    last_sync_at: Optional[datetime] = Field(
+        default=None, description="最近一次录音文件同步完成时间；不传保留旧值"
+    )
+
+
+class DeviceStatusAck(DeviceStatusOut):
+    """上报响应：服务端裁决后的状态快照 + 校时与心跳节奏。"""
+
+    server_time: datetime
+    heartbeat_interval_seconds: int
 
 
 class CredentialOut(BaseModel):

@@ -33,6 +33,7 @@ from app.schemas.device import (
     DeviceOut,
     DeviceStatusOut,
     DeviceUpdate,
+    build_status_out,
 )
 from app.services import device_service
 from app.services.assignment_service import assign_device, return_device
@@ -278,7 +279,7 @@ async def device_status(
     status = device.status
     if status is None:
         return DeviceStatusOut(device_id=device.id, online=False, charging=False, recording=False)
-    return DeviceStatusOut.model_validate(status)
+    return build_status_out(status)
 
 
 # ---------------------------------------------------------------------------

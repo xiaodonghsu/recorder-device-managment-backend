@@ -48,6 +48,8 @@ class EventType(str, Enum):
     NICKNAME_UPDATED = "nickname_updated"
     DEVICE_PROFILE_UPDATED = "device_profile_updated"
     BINDING_REVOKED = "binding_revoked"
+    # APP 状态上报：仅在在线/充电/录音发生跃迁时记录，高频心跳不逐条留痕
+    DEVICE_STATUS_CHANGED = "device_status_changed"
 
 
 # 允许员工发起绑定的设备状态（README §7.8：禁用、挂失、报废设备不得创建新绑定）

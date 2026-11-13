@@ -25,7 +25,7 @@ README §8「第一阶段开发范围」中的 **P0 全部功能**均已实现�
 | 设备挂失和禁用 | `POST /api/devices/{id}/lost`、`/disable` | ✅ |
 | 设备维修管理 | `POST /api/devices/{id}/repair` | ✅ |
 | AuthKey 轮换 | `POST /api/devices/{id}/credential/rotate` | ✅ |
-| 设备电量及状态监控 | `device_status` 表已建，**未开放上报接口**（固件不连后端，见 §6） | ◐ |
+| 设备电量及状态监控 | `PUT /api/my/devices/{id}/status`（APP 代报）+ `GET /api/devices/{id}/status`，见 §5.4.1 | ✅ |
 | 企业服务授权 / ASR 额度 / AI 摘要额度 / OTA / 资产统计 | P2，暂未实现 | ⏳ |
 
 另有配套的**管理后台前端**（`../frontend/`，无构建步骤），按上表逐表提供管理视图：
@@ -58,13 +58,13 @@ backend/
 │   │   └── casdoor.py          # Casdoor OIDC 客户端与身份模型
 │   ├── api/
 │   │   ├── deps.py             # 认证依赖、租户范围、管理员判定
-│   │   └── routes/             # 路由：devices / bindings / credentials / me / auth / tables
-│   └── services/               # 业务服务层（事务、状态机、事件、表格查询）
+│   │   └── routes/             # 路由：devices / bindings / credentials / me / status / auth / tables
+│   └── services/               # 业务服务层（事务、状态机、事件、状态上报、表格查询）
 ├── sql/schema.mysql.sql        # MySQL 生产建表脚本
 ├── scripts/init_db.py          # 数据库初始化脚本
 ├── scripts/seed_demo.py        # 演示数据生成脚本
 ├── scripts/whoami.py           # 令牌身份自查脚本
-├── tests/                      # 75 个自动化测试
+├── tests/                      # 117 个自动化测试
 ├── requirements.txt
 └── .env.example
 ```
@@ -437,8 +437,65 @@ uv run scripts/whoami.py <access_token>
 |---|---|---|---|
 | GET | `/api/my/devices` | U | 我领用的设备，`items[].auth_key` 为当前有效的 AuthKey 明文，无可用凭证时为 `null` |
 | GET | `/api/my/devices/{id}` | U | 我的设备详情 |
+| PUT | `/api/my/devices/{id}/status` | U | **APP 代报设备状态**（电量 / 充电 / 录音 / 心跳），见 §5.4.1 |
 | GET | `/api/my/profile` | U | 当前登录身份（租户、角色、是否管理员） |
 | GET | `/api/auth/config` | 公开 | Casdoor 登录参数（授权地址、client_id 等） |
+
+#### 5.4.1 设备状态上报（APP 代报）
+
+录音卡固件不与后端通信，蓝牙实测值只能由手机 APP 代报。该端点是 `device_status`
+**唯一的写入路径**；管理后台的 `GET /api/devices/{id}/status`、`/api/tables/statuses`
+以及设备详情里的 `status` 子对象都是只读，写入后自动展示，前端无需改动。
+
+```http
+PUT /api/my/devices/12/status
+Authorization: Bearer <access_token>
+Content-Type: application/json
+
+{
+  "sampled_at": "2026-11-13T06:18:30Z",
+  "connected": true,
+  "battery_level": 78,
+  "charging": true,
+  "recording": false,
+  "last_seen_at": "2026-11-13T06:18:28Z",
+  "last_sync_at": "2026-11-13T05:40:00Z"
+}
+```
+
+| 字段 | 由谁写 | 口径 |
+|---|---|---|
+| `sampled_at` | APP | 必填，采集时刻；带 `Z` / 偏移或无后缀（按 UTC 解释），服务端统一转 naive UTC |
+| `connected` | APP | 必填，蓝牙是否保持连接；断连时 `online` 立即置 false |
+| `battery_level` / `charging` / `recording` | APP | 蓝牙实测；电量 0–100；未传保留旧值，显式传 `null` 才清空电量 |
+| `last_seen_at` | APP + 服务端校准 | 最近一次与设备成功通信，不超过 `sampled_at`、单调不回退 |
+| `last_sync_at` | APP | 最近一次录音文件同步完成（`filetransfer` 独立库，后端无法自行推断） |
+| `online` / `updated_at` | **服务端** | `online = connected 且 last_seen_at 未超时`；`updated_at` 为服务端 naive UTC。请求体传这两个字段会被 422 拒绝 |
+
+响应为 `DeviceStatusAck`：`DeviceStatusOut` 全部字段 + `server_time`（供 APP 校时）
++ `heartbeat_interval_seconds`（建议心跳间隔，默认 60）。
+
+**校验与裁决规则**：
+
+1. 鉴权是「员工代报」而非设备身份认证：`get_current_user` 校验 Token，服务层再校验
+   「当前领用员工 + 有效 APP 绑定 + 同租户 + 生命周期允许」；跨租户 404、
+   非领用人 / 未绑定 403、禁用 / 挂失 / 维修 / 报废 409 `invalid_device_state`。
+   管理员若不是领用人同样不能代报。固件侧挑战-响应 / 设备签名留待后续接入。
+2. **在线超时**：`DEVICE_ONLINE_TIMEOUT_SECONDS`（默认 300）。所有读取路径
+   （设备详情、我的设备、状态端点、状态列表、概览）统一按
+   `last_seen_at` 派生 `online`，避免 APP 掉线后后台永远显示在线；
+   `/api/tables/statuses?online=` 筛选也按同一口径。
+3. **防乱序 / 防伪造时间**：采集时刻晚于服务端时间超过
+   `DEVICE_STATUS_MAX_CLOCK_SKEW_SECONDS`（默认 300）返回 422 `invalid_sample_time`；
+   早于上次接收时间超过该值的旧快照返回 409 `stale_status_report`。
+   APP 恢复网络后应重新采样再上报，不要回放离线缓存的旧快照。
+4. **高频写入**：以 `device_id` 为主键单行 UPSERT；只有 `online` / `charging` /
+   `recording` 发生跃迁时才写一条 `device_status_changed` 事件，心跳不逐条留痕。
+   服务端不限流，由客户端按 `heartbeat_interval_seconds` 节流；如需强制限流应在 nginx 层配置。
+5. 固件版本等档案字段仍由管理员 `PUT /api/devices/{id}` 维护，APP 不报、也不能改。
+
+**隐私提示**：`recording=true` 会让管理员看到「某员工此刻正在录音」，如属敏感信息，
+应由产品确认上报口径，或改为只上报设备忙 / 闲。
 
 ### 5.5 表格管理（跨设备只读）
 
@@ -476,6 +533,8 @@ uv run scripts/whoami.py <access_token>
 | `validation_error` | 422 | 参数校验失败 |
 | `employee_not_found` | 422 | 工号在 Casdoor 中不存在 / 组织不符 / 账号禁用（继承 `validation_error` 状态码） |
 | `employee_no_required` | 422 | 领用表单填了 Casdoor UUID 或姓名，应填工号 `preferred_username` |
+| `invalid_sample_time` | 422 | 状态上报的 `sampled_at` 晚于服务端时间过多（手机时钟偏差） |
+| `stale_status_report` | 409 | 状态快照早于服务端已接收的最新快照（离线回放），已丢弃 |
 | `casdoor_error` | 502 | Casdoor 服务异常；`CASDOOR_VERIFY_EMPLOYEE=required` 且工号查询不可用时也会返回 |
 
 ---
@@ -483,10 +542,10 @@ uv run scripts/whoami.py <access_token>
 ## 6. 与 README 的关键实现差异（需确认）
 
 1. **不提供设备侧（固件）接口**。录音卡固件不与后端通信，因此：
-   - 未实现「设备用 AuthKey 调用后端做身份认证」的端点；
-   - `device_status` 表已建好，但**没有状态上报接口**，电量 / 充电 / 录音状态
-     只能由后续接入固件或第三方同步时填充（服务层已预留
-     `device_service` 中的状态读写逻辑）。
+   - 未实现「设备用 AuthKey 调用后端做身份认证」的端点；设备证明需固件支持挑战-响应后再补。
+   - **状态上报改由手机 APP 代报**：`PUT /api/my/devices/{id}/status`（§5.4.1）。
+     一期用员工 Token + 当前领用 / 有效绑定 / 租户校验，证明的是「该领用人有权报这台设备」，
+     不是设备身份；`online` / `updated_at` 由服务端裁决，并按心跳超时派生在线状态。
    - 手机 APP 从领用列表取得 AuthKey，用于与录音卡认证并建立连接。
 2. **首次绑定即激活设备**：设备在 `registered` 状态下被员工首次绑定时，
    自动流转为 `active` 并写入 `activated_at` 与 `device_activated` 事件。
@@ -535,6 +594,7 @@ uv run scripts/whoami.py <access_token>
 | `device_disabled` / `device_enabled` | 禁用 / 启用 |
 | `device_lost` / `device_repaired` / `device_retired` | 挂失 / 维修 / 报废 |
 | `device_profile_updated` | 档案字段更新 |
+| `device_status_changed` | APP 状态上报导致在线 / 充电 / 录音发生跃迁（高频心跳不写） |
 
 事件详情（`event_data` JSON）记录变更前后值、操作人与原因，可用于完整追溯。
 
@@ -544,7 +604,7 @@ uv run scripts/whoami.py <access_token>
 
 ```bash
 cd backend
-uv run -m pytest              # 75 passed
+uv run -m pytest              # 117 passed
 ```
 
 覆盖范围：
@@ -559,6 +619,7 @@ uv run -m pytest              # 75 passed
 | `tests/test_casdoor.py` | Casdoor userinfo / introspect 解析、管理员判定、禁用账号拒绝、登录配置 |
 | `tests/test_tables.py` | 表格级接口：五张表的跨设备列表与筛选、员工清单、概览聚合、租户隔离与管理员拦截 |
 | `tests/test_config.py` | 配置中心：`api_prefix` 规范化与 Windows 路径拦截、静态目录推导 |
+| `tests/test_status_report.py` | APP 状态上报：全读路径同步、归属与租户校验、断连 / 超时离线、乱序与未来时间拒绝、服务端字段防伪造、跃迁事件 |
 
 测试使用 SQLite 内存库，与生产 MySQL 共用同一套 ORM 与服务层代码。
 
@@ -583,7 +644,9 @@ uv run -m pytest              # 75 passed
 
 ## 11. 后续可扩展点
 
-- **设备状态上报**：`device_status` 表已就绪，可在 `app/api/routes/` 下新增 `/api/device/status`（需固件或客户端配合）。
+- **设备状态上报（一期已完成）**：`PUT /api/my/devices/{id}/status` 已开放 APP 代报，
+  见 §5.4.1。后续可补：① 固件侧挑战-响应 / 设备签名，把「员工代报」升级为设备身份认证；
+  ② 服务端限流与心跳异常告警；③ `device_status` 历史轨迹表（当前只存最新快照）。
 - **批量设备分配**：`register_devices_batch` 已是逐条事务，批量分配可复用同一模式。
 - **员工离职回收**：可对接 Casdoor 的用户事件或定时任务，扫描超期领用记录并批量归还。
 - **企业资产统计**：`device` / `device_assignment` 已有完整维度，直接聚合即可出报表。

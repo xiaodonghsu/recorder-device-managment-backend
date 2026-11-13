@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import auth, bindings, credentials, devices, me, tables
+from app.api.routes import auth, bindings, credentials, devices, me, status, tables
 from app.core.config import settings
 from app.core.errors import AppError
 from app.db.session import get_engine, init_db
@@ -108,7 +108,7 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 # ---------------------------------------------------------------------------
 # 路由
 # ---------------------------------------------------------------------------
-for module in (auth, devices, bindings, credentials, me, tables):
+for module in (auth, devices, bindings, credentials, me, status, tables):
     app.include_router(module.router, prefix=settings.api_prefix)
 
 @app.get("/healthz", tags=["运维"], summary="存活探针")

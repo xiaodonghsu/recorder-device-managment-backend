@@ -79,9 +79,15 @@ class Settings(BaseSettings):
     # 用户名 / 邮箱白名单（兜底方案，不依赖 Casdoor 内部权限配置）
     casdoor_admin_users: str = ""
 
-    # ---------------- 设备凭证 ----------------
+    # ---------------- 设备凭证 / 状态上报 ----------------
     auth_key_default_ttl_days: int = 0
+    # 最近一次通信超过该秒数即判定离线；所有状态读取路径统一按此口径派生 online
     device_online_timeout_seconds: int = 300
+    # 下发给 APP 的建议心跳间隔（秒），服务端不限流，由客户端节流
+    device_status_heartbeat_seconds: int = 60
+    # 允许的客户端时钟偏差：采集时刻晚于服务端当前时间超过该值即拒绝；
+    # 早于「上次接收时间 - 该值」的旧快照也拒绝，避免离线回放覆盖最新状态
+    device_status_max_clock_skew_seconds: int = 300
 
     # ---------------- CORS ----------------
     cors_origins: str = "*"

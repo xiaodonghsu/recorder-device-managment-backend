@@ -40,6 +40,7 @@ from app.schemas.device import (
     DeviceBatchResultItem,
     DeviceCreate,
     DeviceUpdate,
+    build_status_out,
 )
 from app.services.event_service import record_event
 from app.services.transaction import transaction
@@ -324,7 +325,8 @@ def build_device_out(device: Device) -> Dict[str, Any]:
         "bound_user_id": binding.user_id if binding else None,
         "nickname": binding.nickname if binding else None,
         "binding_status": binding.status if binding else None,
-        "status": device.status,
+        # online 统一按心跳超时派生，避免 APP 掉线后后台永远显示在线
+        "status": build_status_out(device.status).model_dump() if device.status else None,
     }
 
 
