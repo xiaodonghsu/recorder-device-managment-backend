@@ -25,7 +25,7 @@ README §8「第一阶段开发范围」中的 **P0 全部功能**均已实现�
 | 设备挂失和禁用 | `POST /api/devices/{id}/lost`、`/disable` | ✅ |
 | 设备维修管理 | `POST /api/devices/{id}/repair` | ✅ |
 | AuthKey 轮换 | `POST /api/devices/{id}/credential/rotate` | ✅ |
-| 设备电量及状态监控 | `PUT /api/my/devices/{id}/status`（APP 代报）+ `GET /api/devices/{id}/status`，见 §5.4.1 | ✅ |
+| 设备状态监控（电量 / 容量 / 固件 / 增益） | `PUT /api/my/devices/{id}/status`（APP 代报）+ `GET /api/devices/{id}/status`，见 §5.4.1 | ✅ |
 | 企业服务授权 / ASR 额度 / AI 摘要额度 / OTA / 资产统计 | P2，暂未实现 | ⏳ |
 
 另有配套的**管理后台前端**（`../frontend/`，无构建步骤），按上表逐表提供管理视图：
@@ -61,6 +61,7 @@ backend/
 │   │   └── routes/             # 路由：devices / bindings / credentials / me / status / auth / tables
 │   └── services/               # 业务服务层（事务、状态机、事件、状态上报、表格查询）
 ├── sql/schema.mysql.sql        # MySQL 生产建表脚本
+├── sql/migration_status_ext.sql # 存量库补列（容量 / 固件 / 增益 / metrics）
 ├── scripts/init_db.py          # 数据库初始化脚本
 ├── scripts/seed_demo.py        # 演示数据生成脚本
 ├── scripts/whoami.py           # 令牌身份自查脚本
@@ -138,11 +139,21 @@ uv run scripts/init_db.py                     # 方式二：由 ORM 建表
 
 > MySQL 需 **8.0.16 及以上**，否则 `CHECK` 约束不会被执行。
 
-### 升级旧版设备凭证表
+### 升级已有数据库（凭证表 + 状态表）
 
 已有数据库在升级时先停止旧版服务，再使用目标数据库的配置执行 `uv run scripts/init_db.py`，随后启动新版。
 脚本保留设备、凭证版本和状态，移除旧的摘要列，并为旧凭证留空 `auth_key`。
 开发环境启动时会自动执行同一升级。
+
+`device_status` 新增 5 列（`storage_free_bytes` / `storage_total_bytes` /
+`firmware_version` / `gain` / `metrics`）：开发环境的 SQLite 由 `init_db()` 幂等补列；
+生产 MySQL 因跳过自动建表，需**先备份**再执行：
+
+```bash
+mysql -u root -p voicehub_device < sql/migration_status_ext.sql
+```
+
+存量行无需回填，新列允许 NULL，APP 下一次心跳上报后即有值。字段设计与取舍见 §5.4.2。
 
 旧 HMAC 摘要无法还原原始 AuthKey。若已掌握录音卡当前使用的原始密钥，
 可按凭证记录 ID 将其补录到 `device_credential.auth_key` 中对应的有效凭证。
@@ -437,7 +448,7 @@ uv run scripts/whoami.py <access_token>
 |---|---|---|---|
 | GET | `/api/my/devices` | U | 我领用的设备，`items[].auth_key` 为当前有效的 AuthKey 明文，无可用凭证时为 `null` |
 | GET | `/api/my/devices/{id}` | U | 我的设备详情 |
-| PUT | `/api/my/devices/{id}/status` | U | **APP 代报设备状态**（电量 / 充电 / 录音 / 心跳），见 §5.4.1 |
+| PUT | `/api/my/devices/{id}/status` | U | **APP 代报设备状态**（电量 / 充电 / 录音 / 心跳 / 容量 / 固件 / 增益 / `metrics`），见 §5.4.1 |
 | GET | `/api/my/profile` | U | 当前登录身份（租户、角色、是否管理员） |
 | GET | `/api/auth/config` | 公开 | Casdoor 登录参数（授权地址、client_id 等） |
 
@@ -458,6 +469,11 @@ Content-Type: application/json
   "battery_level": 78,
   "charging": true,
   "recording": false,
+  "storage_free_bytes": 12884901888,
+  "storage_total_bytes": 34359738368,
+  "firmware_version": "1.4.0",
+  "gain": 2,
+  "metrics": { "rssi_dbm": -61, "codec": "opus" },
   "last_seen_at": "2026-11-13T06:18:28Z",
   "last_sync_at": "2026-11-13T05:40:00Z"
 }
@@ -468,12 +484,18 @@ Content-Type: application/json
 | `sampled_at` | APP | 必填，采集时刻；带 `Z` / 偏移或无后缀（按 UTC 解释），服务端统一转 naive UTC |
 | `connected` | APP | 必填，蓝牙是否保持连接；断连时 `online` 立即置 false |
 | `battery_level` / `charging` / `recording` | APP | 蓝牙实测；电量 0–100；未传保留旧值，显式传 `null` 才清空电量 |
+| `storage_free_bytes` / `storage_total_bytes` | APP | 实测剩余 / 总容量（**字节**，非负 BIGINT）；未传保留旧值，显式 `null` 清空；两者合并后必须满足 `free <= total` |
+| `firmware_version` | APP | 蓝牙读到的固件版本，≤32 字符；**只写 `device_status` 快照，不改 `device` 主表档案字段**；空白字符串拒绝，读不到请传 `null` |
+| `gain` | APP | 录音增益档位，整数 **1–3**；未传保留旧值，显式 `null` 清空 |
+| `metrics` | APP | 可选 JSON 遥测扩展槽：扁平对象、≤20 键 / ≤2 KB、值只允许标量或一维数组，禁止占用正式字段名；未传保留、传对象**整体覆盖**、传 `null` 清空 |
 | `last_seen_at` | APP + 服务端校准 | 最近一次与设备成功通信，不超过 `sampled_at`、单调不回退 |
 | `last_sync_at` | APP | 最近一次录音文件同步完成（`filetransfer` 独立库，后端无法自行推断） |
 | `online` / `updated_at` | **服务端** | `online = connected 且 last_seen_at 未超时`；`updated_at` 为服务端 naive UTC。请求体传这两个字段会被 422 拒绝 |
 
-响应为 `DeviceStatusAck`：`DeviceStatusOut` 全部字段 + `server_time`（供 APP 校时）
-+ `heartbeat_interval_seconds`（建议心跳间隔，默认 60）。
+响应为 `DeviceStatusAck`：`DeviceStatusOut` 全部字段（含上面 5 组新字段）+ `server_time`
+（供 APP 校时）+ `heartbeat_interval_seconds`（建议心跳间隔，默认 60）。
+`GET /api/devices/{id}/status`、`/api/my/devices`、`/api/tables/statuses`、
+设备详情的 `status` 子对象同步返回这些字段，前端状态表格与详情抽屉已展示容量 / 固件 / 增益。
 
 **校验与裁决规则**：
 
@@ -492,10 +514,47 @@ Content-Type: application/json
 4. **高频写入**：以 `device_id` 为主键单行 UPSERT；只有 `online` / `charging` /
    `recording` 发生跃迁时才写一条 `device_status_changed` 事件，心跳不逐条留痕。
    服务端不限流，由客户端按 `heartbeat_interval_seconds` 节流；如需强制限流应在 nginx 层配置。
-5. 固件版本等档案字段仍由管理员 `PUT /api/devices/{id}` 维护，APP 不报、也不能改。
+5. **固件版本只写快照**：`firmware_version` 是 APP 蓝牙实测值，落在 `device_status`；
+   `device` 主表的档案固件版本仍由管理员 `PUT /api/devices/{id}` 维护，APP 不能改。
+   两者不一致时提示管理员核对，不做自动同步。
+6. **容量与增益校验**：`gain` 限 1–3、字节数非负且 `free <= total`。Pydantic 校验
+   本次请求，服务层在「新旧值合并后」再校验一次（APP 常只更新 `free`、`total`
+   留在上一次心跳里），违反返回 422 `invalid_storage_capacity`。新字段变化**不写事件**，
+   以免高频心跳刷屏；跃迁事件仍只覆盖 `online` / `charging` / `recording`。
+7. **存储形态**：容量 / 固件 / 增益是明确、要展示与筛选的业务量，用**结构化列**；
+   `metrics` 才是 JSON 扩展槽，承接未定型的稀疏遥测。取舍见 §5.4.2。
 
 **隐私提示**：`recording=true` 会让管理员看到「某员工此刻正在录音」，如属敏感信息，
 应由产品确认上报口径，或改为只上报设备忙 / 闲。
+
+#### 5.4.2 status 能不能整体存成一个 JSON 文本列？
+
+**技术上可以**：项目里 `device_event.event_data` 已经用 SQLAlchemy `JSON`
+（MySQL 是原生 `JSON`，SQLite 以 TEXT 存 JSON 字符串），把整条状态快照压成
+一个 `status_json` 列没有驱动障碍，且以后加字段不用 `ALTER TABLE`。
+但本项目采用「**结构化列 + 一个受控 JSON 扩展槽**」，理由如下：
+
+| 维度 | 全部塞进一个 JSON 文本列 | 当前做法（正式列 + `metrics`） |
+|---|---|---|
+| 表格查询 | `/api/tables/statuses` 要逐行反序列化；按容量阈值 / 增益 / 固件版本筛选需 `JSON_EXTRACT` + 生成列索引 | 直接 `WHERE gain = 3`、`WHERE storage_free_bytes < ...`，可加索引 |
+| 数据约束 | 只能靠 Pydantic 在应用层挡，DB 无 `CHECK`；修数据 / 导入等旁路容易写脏 | `gain BETWEEN 1 AND 3`、字节数非负、`free <= total` 由 DB CHECK + Pydantic 双重保障 |
+| 在线派生 | `online` 依赖 `last_seen_at` 与超时阈值做 SQL 比较，藏在 JSON 里会让 `?online=` 筛选退化为全表扫描 | `last_seen_at` 是独立列，`build_status_out()` 与列表筛选共用一套口径 |
+| 跨库一致性 | MySQL 原生 JSON 与 SQLite 的 TEXT 语义不同，查询函数不可直接复用 | 标量列两种方言语义一致 |
+| 演进成本 | 零 DDL，但每次读都要解析，字段语义无 schema 可查 | 加字段要 `ALTER`，但 `metrics` 已承接临时 / 稀疏字段，不必每加一个就改表 |
+
+结论：**已知、要展示 / 筛选 / 统计的字段一律用正式列**；`metrics` 只用于
+「还没定型、暂不参与查询」的稀疏遥测（如 RSSI、编码格式、SDK 版本）。
+等某个 `metrics` 键稳定下来且需要查询时，再提升为正式列并从 `metrics` 移除。
+
+`metrics` 是开放写入口，因此在 `app/schemas/device.py` 的
+`normalize_status_metrics()` 里限死：扁平键值、键名 `[A-Za-z_][A-Za-z0-9_]{0,31}`、
+≤20 键、序列化 ≤2 KB、值只允许标量或一维标量数组、禁止占用正式字段名。
+不要把它当成任意对象存储。
+
+**存量库升级**：新装环境用 `sql/schema.mysql.sql`；已存在的生产 MySQL 执行
+`sql/migration_status_ext.sql`（含 CHECK 约束，执行前先备份）。本地 SQLite
+`dev.db` 由 `app.db.session.init_db()` 在启动时自动补列（幂等），但 SQLite
+无法给已有表补 CHECK，约束由服务层校验兜底；如需完整约束请重建库。
 
 ### 5.5 表格管理（跨设备只读）
 
@@ -507,7 +566,7 @@ Content-Type: application/json
 | GET | `/api/tables/assignments` | A | device_assignment 列表（按领用状态 / 员工 / SN 筛选） |
 | GET | `/api/tables/bindings` | A | device_binding 列表（按状态 / 员工 / 昵称筛选） |
 | GET | `/api/tables/credentials` | A | device_credential 列表（不含 AuthKey 明文） |
-| GET | `/api/tables/statuses` | A | device_status 列表（按在线 / 生命周期筛选） |
+| GET | `/api/tables/statuses` | A | device_status 列表（按在线 / 生命周期筛选；含容量 / 固件 / 增益 / `metrics`） |
 | GET | `/api/tables/events` | A | device_event 列表（按事件类型 / 设备 / 操作人筛选） |
 | GET | `/api/tables/employees` | A | 员工清单（由领用记录反推，供领用弹窗选人） |
 | GET | `/api/tables/overview` | A | 概览聚合指标（总量 / 生命周期分布 / 领用绑定 / 事件统计） |
@@ -534,6 +593,7 @@ Content-Type: application/json
 | `employee_not_found` | 422 | 工号在 Casdoor 中不存在 / 组织不符 / 账号禁用（继承 `validation_error` 状态码） |
 | `employee_no_required` | 422 | 领用表单填了 Casdoor UUID 或姓名，应填工号 `preferred_username` |
 | `invalid_sample_time` | 422 | 状态上报的 `sampled_at` 晚于服务端时间过多（手机时钟偏差） |
+| `invalid_storage_capacity` | 422 | 状态上报的剩余容量大于总容量（含与旧值合并后的情况） |
 | `stale_status_report` | 409 | 状态快照早于服务端已接收的最新快照（离线回放），已丢弃 |
 | `casdoor_error` | 502 | Casdoor 服务异常；`CASDOOR_VERIFY_EMPLOYEE=required` 且工号查询不可用时也会返回 |
 
@@ -619,7 +679,7 @@ uv run -m pytest              # 117 passed
 | `tests/test_casdoor.py` | Casdoor userinfo / introspect 解析、管理员判定、禁用账号拒绝、登录配置 |
 | `tests/test_tables.py` | 表格级接口：五张表的跨设备列表与筛选、员工清单、概览聚合、租户隔离与管理员拦截 |
 | `tests/test_config.py` | 配置中心：`api_prefix` 规范化与 Windows 路径拦截、静态目录推导 |
-| `tests/test_status_report.py` | APP 状态上报：全读路径同步、归属与租户校验、断连 / 超时离线、乱序与未来时间拒绝、服务端字段防伪造、跃迁事件 |
+| `tests/test_status_report.py` | APP 状态上报：全读路径同步、归属与租户校验、断连 / 超时离线、乱序与未来时间拒绝、服务端字段防伪造、跃迁事件，以及容量 / 固件 / 增益 / `metrics` 的写入、保留旧值、边界与合并后校验 |
 
 测试使用 SQLite 内存库，与生产 MySQL 共用同一套 ORM 与服务层代码。
 
@@ -633,7 +693,8 @@ uv run -m pytest              # 117 passed
 - [ ] `CASDOOR_CLIENT_ID` / `CASDOOR_CLIENT_SECRET` 已配置（introspect 与严格查询身份所需）
 - [ ] `CASDOOR_VERIFY_EMPLOYEE` 已按一致性要求选定 `optional` / `required`；容器部署时
       已在 `docker-compose.yml` 透传
-- [ ] `DATABASE_URL` 指向 MySQL 8.0.16+，并已执行 `sql/schema.mysql.sql`
+- [ ] `DATABASE_URL` 指向 MySQL 8.0.16+，并已执行 `sql/schema.mysql.sql`；
+      存量库已备份并执行 `sql/migration_status_ext.sql`（补 `device_status` 5 列，见 §5.4.2）
 - [ ] `CORS_ORIGINS` 收敛为具体域名（不要保留 `*`）
 - [ ] Casdoor 应用已配置正确的回调地址与 Token 有效期
       （管理后台：`https://office.uassist.cn:40000/voicehub/`）

@@ -332,6 +332,23 @@ class DeviceStatus(Base):
     battery_level: Mapped[Optional[int]] = mapped_column(SmallInteger)
     charging: Mapped[bool] = mapped_column(BOOL, nullable=False, default=False, server_default=text("0"))
     recording: Mapped[bool] = mapped_column(BOOL, nullable=False, default=False, server_default=text("0"))
+
+    # APP 代报的容量 / 固件 / 增益。这四项是明确的、需要展示与筛选的业务量，
+    # 因此用正式列（可用 SQL WHERE / 索引 / CHECK），不塞进 JSON 扩展槽。
+    # 注意 firmware_version 是蓝牙实测值，只写本表，不改 device 主表的档案字段。
+    storage_free_bytes: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(mysql.BIGINT(unsigned=True), "mysql")
+    )
+    storage_total_bytes: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(mysql.BIGINT(unsigned=True), "mysql")
+    )
+    firmware_version: Mapped[Optional[str]] = mapped_column(String(32))
+    gain: Mapped[Optional[int]] = mapped_column(SmallInteger)
+
+    # 稀疏遥测扩展槽：未来新增的临时字段先落这里，成熟后再提升为正式列。
+    # SQLAlchemy JSON 在 MySQL 是原生 JSON、在 SQLite 是 TEXT 存 JSON 文本。
+    metrics: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON)
+
     last_seen_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP)
     last_sync_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP)
     updated_at: Mapped[datetime] = mapped_column(
@@ -343,6 +360,20 @@ class DeviceStatus(Base):
             "battery_level IS NULL OR battery_level BETWEEN 0 AND 100",
             name="device_status_battery_range",
         ),
+        CheckConstraint(
+            "storage_free_bytes IS NULL OR storage_free_bytes >= 0",
+            name="storage_free_non_negative",
+        ),
+        CheckConstraint(
+            "storage_total_bytes IS NULL OR storage_total_bytes >= 0",
+            name="storage_total_non_negative",
+        ),
+        CheckConstraint(
+            "storage_free_bytes IS NULL OR storage_total_bytes IS NULL "
+            "OR storage_free_bytes <= storage_total_bytes",
+            name="storage_free_le_total",
+        ),
+        CheckConstraint("gain IS NULL OR gain BETWEEN 1 AND 3", name="gain_range"),
     )
 
     device: Mapped["Device"] = relationship(back_populates="status")

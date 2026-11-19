@@ -1,7 +1,7 @@
-"""设备状态上报服务（手机 APP 代报，README §5.4 / APP 对接说明 §6.3）。
+"""设备状态上报服务（手机 APP 代报，README §5.4.1 / APP 对接说明 §6.2.1）。
 
-录音卡固件不与后端通信，蓝牙实测值（电量 / 充电 / 录音 / 连接状态）只能由
-手机 APP 代报。本模块负责：
+录音卡固件不与后端通信，蓝牙实测值（电量 / 充电 / 录音 / 连接状态 / 容量 /
+固件版本 / 增益 / 扩展遥测）只能由手机 APP 代报。本模块负责：
 
 - **归属校验**：当前领用员工 + 有效 APP 绑定 + 同租户 + 生命周期允许；
   这是「员工代报」而非设备身份认证，真正的设备证明需固件侧挑战-响应。
@@ -130,6 +130,11 @@ def report_status(
 
     # 3) 字段合并：未传的可选字段保留旧值（心跳可以只带变化项）。
     provided = payload.model_dump(exclude_unset=True)
+
+    def _merge(name: str, previous: Any) -> Any:
+        """未传保留旧值，显式传 null 清空；metrics 传对象表示整体覆盖。"""
+        return provided[name] if name in provided else previous
+
     old_seen = to_naive_utc(status.last_seen_at)
     old_sync = to_naive_utc(status.last_sync_at)
     old = {
@@ -163,6 +168,29 @@ def report_status(
         payload.recording if payload.recording is not None else bool(status.recording)
     )
 
+    # APP 遥测字段与电量同口径。存量库未迁移时 getattr 兜底返回 None。
+    storage_free = _merge("storage_free_bytes", getattr(status, "storage_free_bytes", None))
+    storage_total = _merge("storage_total_bytes", getattr(status, "storage_total_bytes", None))
+    firmware = _merge("firmware_version", getattr(status, "firmware_version", None))
+    gain_value = _merge("gain", getattr(status, "gain", None))
+    metrics_value = _merge("metrics", getattr(status, "metrics", None))
+
+    # 跨字段校验必须放在合并之后：APP 常常只更新 free，total 还留在上一次心跳里。
+    # Pydantic 已在「本次请求内同时传两项」时挡过一次，这里补上「新旧值组合」的情况。
+    if (
+        storage_free is not None
+        and storage_total is not None
+        and storage_free > storage_total
+    ):
+        raise ValidationError(
+            "剩余容量不能大于总容量，请重新采集后上报",
+            error_code="invalid_storage_capacity",
+            details={
+                "storage_free_bytes": storage_free,
+                "storage_total_bytes": storage_total,
+            },
+        )
+
     changes: Dict[str, Dict[str, Any]] = {}
     for field, value in (
         ("online", online),
@@ -177,6 +205,11 @@ def report_status(
         status.battery_level = battery
         status.charging = charging
         status.recording = recording
+        status.storage_free_bytes = storage_free
+        status.storage_total_bytes = storage_total
+        status.firmware_version = firmware
+        status.gain = gain_value
+        status.metrics = metrics_value
         status.last_seen_at = last_seen
         status.last_sync_at = last_sync
         status.updated_at = now
@@ -197,12 +230,17 @@ def report_status(
             )
 
     logger.info(
-        "设备状态上报：device=%s reporter=%s online=%s battery=%s recording=%s",
+        "设备状态上报：device=%s reporter=%s online=%s battery=%s recording=%s "
+        "free=%s total=%s firmware=%s gain=%s",
         device.id,
         reporter or operator_id or "-",
         online,
         battery,
         recording,
+        storage_free,
+        storage_total,
+        firmware,
+        gain_value,
     )
 
     snapshot = build_status_out(status, now=now)

@@ -11,7 +11,7 @@ README §3 的 6 张表都需要在管理后台中「分别管理」，而设备
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -83,6 +83,11 @@ class StatusRow(BaseModel):
     battery_level: Optional[int] = None
     charging: bool = False
     recording: bool = False
+    storage_free_bytes: Optional[int] = None
+    storage_total_bytes: Optional[int] = None
+    firmware_version: Optional[str] = None
+    gain: Optional[int] = None
+    metrics: Optional[Dict[str, Any]] = None
     last_seen_at: Optional[datetime] = None
     last_sync_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

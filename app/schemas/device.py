@@ -2,13 +2,89 @@
 
 from __future__ import annotations
 
+import json
+import math
+import re
 from datetime import datetime, timezone
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.enums import LifecycleStatus
 from app.core.security import is_auth_key_plausible
+
+
+# ---------------------------------------------------------------------------
+# device_status.metrics：稀疏遥测扩展槽的约束
+#
+# 这是一个开放写入口，必须限死结构，否则会变成任意大对象 / 嵌套文档的注入点：
+# 只允许一层扁平键值，值只能是标量或一维标量数组；正式字段名禁止占用。
+# ---------------------------------------------------------------------------
+METRIC_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,31}$")
+METRIC_MAX_KEYS = 20
+METRIC_MAX_BYTES = 2048
+METRIC_MAX_STRING = 128
+METRIC_MAX_LIST_ITEMS = 20
+RESERVED_METRIC_KEYS = frozenset(
+    {
+        "device_id",
+        "online",
+        "battery_level",
+        "charging",
+        "recording",
+        "sampled_at",
+        "connected",
+        "last_seen_at",
+        "last_sync_at",
+        "updated_at",
+        "storage_free_bytes",
+        "storage_total_bytes",
+        "firmware_version",
+        "gain",
+        "metrics",
+    }
+)
+
+
+def _check_metric_value(key: str, value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"metrics.{key} 不能是 NaN / Infinity")
+        return value
+    if isinstance(value, str):
+        if len(value) > METRIC_MAX_STRING:
+            raise ValueError(f"metrics.{key} 字符串不得超过 {METRIC_MAX_STRING} 字符")
+        return value
+    if isinstance(value, list):
+        if len(value) > METRIC_MAX_LIST_ITEMS:
+            raise ValueError(f"metrics.{key} 数组不得超过 {METRIC_MAX_LIST_ITEMS} 项")
+        return [_check_metric_value(key, item) for item in value]
+    raise ValueError(f"metrics.{key} 只允许标量或一维数组，不支持对象 / 嵌套结构")
+
+
+def normalize_status_metrics(value: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """校验并归一化遥测扩展槽，返回可直接写入 JSON 列的 dict。"""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("metrics 必须是 JSON 对象")
+    if len(value) > METRIC_MAX_KEYS:
+        raise ValueError(f"metrics 最多 {METRIC_MAX_KEYS} 个键")
+
+    cleaned: Dict[str, Any] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not METRIC_KEY_RE.fullmatch(key):
+            raise ValueError("metrics 键名非法：仅允许字母 / 数字 / 下划线，首字符非数字且 ≤32 字符")
+        if key in RESERVED_METRIC_KEYS:
+            raise ValueError(f"metrics 不能使用正式状态字段名：{key}")
+        cleaned[key] = _check_metric_value(key, item)
+
+    payload = json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    if len(payload.encode("utf-8")) > METRIC_MAX_BYTES:
+        raise ValueError(f"metrics 序列化后不得超过 {METRIC_MAX_BYTES} 字节")
+    return cleaned
 
 
 class DeviceCreate(BaseModel):
@@ -115,6 +191,13 @@ class DeviceStatusOut(BaseModel):
     battery_level: Optional[int] = None
     charging: bool = False
     recording: bool = False
+    storage_free_bytes: Optional[int] = Field(default=None, description="APP 实测剩余容量（字节）")
+    storage_total_bytes: Optional[int] = Field(default=None, description="APP 实测总容量（字节）")
+    firmware_version: Optional[str] = Field(
+        default=None, description="APP 蓝牙实测固件版本（不修改 device 主表档案）"
+    )
+    gain: Optional[int] = Field(default=None, description="录音增益档位 1-3")
+    metrics: Optional[Dict[str, Any]] = Field(default=None, description="稀疏遥测扩展槽（JSON 对象）")
     last_seen_at: Optional[datetime] = None
     last_sync_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -151,12 +234,18 @@ def build_status_out(status: Any, *, now: Optional[datetime] = None) -> DeviceSt
         and last_seen is not None
         and (current - last_seen).total_seconds() <= settings.device_online_timeout_seconds
     )
+    # 新列在存量库执行迁移前可能还不存在，用 getattr 兜底，避免读接口 500。
     return DeviceStatusOut(
         device_id=status.device_id,
         online=online,
         battery_level=status.battery_level,
         charging=bool(status.charging),
         recording=bool(status.recording),
+        storage_free_bytes=getattr(status, "storage_free_bytes", None),
+        storage_total_bytes=getattr(status, "storage_total_bytes", None),
+        firmware_version=getattr(status, "firmware_version", None),
+        gain=getattr(status, "gain", None),
+        metrics=getattr(status, "metrics", None),
         last_seen_at=last_seen,
         last_sync_at=to_naive_utc(status.last_sync_at),
         updated_at=to_naive_utc(status.updated_at),
@@ -182,12 +271,56 @@ class DeviceStatusReport(BaseModel):
     )
     charging: Optional[bool] = Field(default=None, description="不传保留旧值")
     recording: Optional[bool] = Field(default=None, description="不传保留旧值")
+    storage_free_bytes: Optional[int] = Field(
+        default=None, ge=0, description="剩余存储容量（字节）；不传保留旧值，传 null 清空"
+    )
+    storage_total_bytes: Optional[int] = Field(
+        default=None, ge=0, description="总存储容量（字节）；不传保留旧值，传 null 清空"
+    )
+    firmware_version: Optional[str] = Field(
+        default=None,
+        max_length=32,
+        description="APP 蓝牙实测固件版本；只读入状态快照，不改设备档案；传 null 清空",
+    )
+    gain: Optional[int] = Field(
+        default=None, ge=1, le=3, description="录音增益档位 1-3；不传保留旧值，传 null 清空"
+    )
+    metrics: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "可选遥测扩展槽：扁平 JSON 对象，≤20 键 / ≤2 KB，值只允许标量或一维数组；"
+            "不传保留旧值，传 null 清空，传对象整体覆盖"
+        ),
+    )
     last_seen_at: Optional[datetime] = Field(
         default=None, description="最近一次与设备成功通信；不传时由 connected 与 sampled_at 推导"
     )
     last_sync_at: Optional[datetime] = Field(
         default=None, description="最近一次录音文件同步完成时间；不传保留旧值"
     )
+
+    @field_validator("firmware_version")
+    @classmethod
+    def _check_firmware(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        value = v.strip()
+        if not value:
+            raise ValueError("firmware_version 不能是空白字符串；读不到请传 null 或不传")
+        return value
+
+    @field_validator("metrics")
+    @classmethod
+    def _check_metrics(cls, v: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        return normalize_status_metrics(v)
+
+    @model_validator(mode="after")
+    def _check_capacity(self) -> "DeviceStatusReport":
+        free = self.storage_free_bytes
+        total = self.storage_total_bytes
+        if free is not None and total is not None and free > total:
+            raise ValueError("storage_free_bytes 不能大于 storage_total_bytes")
+        return self
 
 
 class DeviceStatusAck(DeviceStatusOut):

@@ -15,6 +15,7 @@ from typing import AsyncIterator
 
 import httpx
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -92,6 +93,28 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     return JSONResponse(status_code=exc.status_code, content=exc.to_payload())
 
 
+def _validation_error_details(exc: RequestValidationError) -> list:
+    """把 Pydantic 校验错误转成可 JSON 序列化的结构。
+
+    Pydantic v2 会把自定义 validator 抛出的 ``ValueError`` 原样放进
+    ``errors[].ctx.error``；直接交给 ``JSONResponse`` 会抛
+    ``TypeError: Object of type ValueError is not JSON serializable``，
+    把本该 422 的请求变成 500。这里把异常转成字符串，其余交给
+    ``jsonable_encoder`` 兜底（例如 input 里的非标量值）。
+    """
+    cleaned = []
+    for error in exc.errors():
+        item = dict(error)
+        ctx = item.get("ctx")
+        if isinstance(ctx, dict):
+            item["ctx"] = {
+                key: str(value) if isinstance(value, BaseException) else value
+                for key, value in ctx.items()
+            }
+        cleaned.append(item)
+    return jsonable_encoder(cleaned)
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     return JSONResponse(
@@ -100,7 +123,7 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
             "code": "validation_error",
             "message": "参数校验失败",
             "status": 422,
-            "details": {"errors": exc.errors()},
+            "details": {"errors": _validation_error_details(exc)},
         },
     )
 

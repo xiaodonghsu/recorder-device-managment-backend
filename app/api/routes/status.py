@@ -1,8 +1,9 @@
-"""手机端设备状态上报接口（README §5.4 / APP 对接说明 §6.3）。
+"""手机端设备状态上报接口（README §5.4.1 / APP 对接说明 §6.2.1）。
 
 录音卡固件不与后端通信，本端点是 ``device_status`` 唯一的写入路径：
-由领用该设备的员工用 Casdoor Token 代报蓝牙实测状态，服务端校验归属、
-裁决 online / updated_at，并覆盖单行状态快照。管理后台仍走只读接口
+由领用该设备的员工用 Casdoor Token 代报蓝牙实测状态（电量、充电、录音、
+连接、容量、固件版本、增益与可选遥测扩展槽），服务端校验归属、裁决
+online / updated_at，并覆盖单行状态快照。管理后台仍走只读接口
 ``GET /devices/{id}/status`` 与 ``GET /tables/statuses``。
 """
 
@@ -24,9 +25,12 @@ router = APIRouter(tags=["设备状态上报"])
     response_model=DeviceStatusAck,
     summary="上报设备状态（APP 代报）",
     description=(
-        "员工上报自己领用且已绑定设备的蓝牙实测状态（电量、充电、录音、连接）。"
+        "员工上报自己领用且已绑定设备的蓝牙实测状态：电量、充电、录音、连接，"
+        "以及 storage_free_bytes / storage_total_bytes（字节）、firmware_version、"
+        "gain（1-3）与可选 metrics 遥测扩展槽。"
         "服务端校验当前领用关系、有效绑定与租户范围；online 与 updated_at "
         "由服务端裁决，客户端传入 online / updated_at 会被拒绝。"
+        "未传的可选字段保留上次值，显式传 null 清空；firmware_version 只写状态快照，不改设备档案。"
         "建议事件驱动 + 30~60 秒心跳，响应中的 heartbeat_interval_seconds "
         "为建议间隔，server_time 供 APP 校时。"
     ),

@@ -136,6 +136,11 @@ CREATE TABLE IF NOT EXISTS device_status (
     battery_level SMALLINT,
     charging TINYINT(1) NOT NULL DEFAULT 0,
     recording TINYINT(1) NOT NULL DEFAULT 0,
+    storage_free_bytes BIGINT UNSIGNED COMMENT 'APP 实测剩余容量（字节）',
+    storage_total_bytes BIGINT UNSIGNED COMMENT 'APP 实测总容量（字节）',
+    firmware_version VARCHAR(32) COMMENT 'APP 蓝牙实测固件版本，非 device 主表档案值',
+    gain TINYINT UNSIGNED COMMENT '录音增益档位 1-3',
+    metrics JSON COMMENT '稀疏遥测扩展槽，正式字段不放在这里',
     last_seen_at DATETIME(3),
     last_sync_at DATETIME(3),
     updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
@@ -145,8 +150,17 @@ CREATE TABLE IF NOT EXISTS device_status (
         FOREIGN KEY (device_id) REFERENCES device(id) ON DELETE CASCADE,
 
     CONSTRAINT ck_device_status_battery_range
-        CHECK (battery_level IS NULL OR battery_level BETWEEN 0 AND 100)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='设备最新状态';
+        CHECK (battery_level IS NULL OR battery_level BETWEEN 0 AND 100),
+    CONSTRAINT ck_device_status_storage_free_non_negative
+        CHECK (storage_free_bytes IS NULL OR storage_free_bytes >= 0),
+    CONSTRAINT ck_device_status_storage_total_non_negative
+        CHECK (storage_total_bytes IS NULL OR storage_total_bytes >= 0),
+    CONSTRAINT ck_device_status_storage_free_le_total
+        CHECK (storage_free_bytes IS NULL OR storage_total_bytes IS NULL
+               OR storage_free_bytes <= storage_total_bytes),
+    CONSTRAINT ck_device_status_gain_range
+        CHECK (gain IS NULL OR gain BETWEEN 1 AND 3)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='设备最新状态（含 APP 实测容量/固件/增益）';
 
 -- ---------------------------------------------------------------------------
 -- 3.6 device_event：设备事件表

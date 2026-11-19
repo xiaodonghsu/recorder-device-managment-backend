@@ -108,15 +108,44 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
+# device_status 的 APP 遥测列（列名 -> 建列 DDL）。DDL 用两种方言都接受的类型名，
+# CHECK 约束只在新建库时由 Base.metadata 建立，存量库由服务层校验兜底。
+_STATUS_EXT_COLUMNS = (
+    ("storage_free_bytes", "BIGINT"),
+    ("storage_total_bytes", "BIGINT"),
+    ("firmware_version", "VARCHAR(32)"),
+    ("gain", "SMALLINT"),
+    ("metrics", "JSON"),
+)
+
+
 def init_db(engine: Engine | None = None, *, drop_first: bool = False) -> None:
-    """建表并升级旧版凭证表（可选先删表）。"""
+    """建表并升级旧版凭证表 / 设备状态表（可选先删表）。"""
     target = engine or get_engine()
     if drop_first:
         logger.warning("即将删除所有表并重建（drop_first=True）")
         Base.metadata.drop_all(target)
     Base.metadata.create_all(target)
     _upgrade_credential_table(target)
+    _upgrade_device_status_table(target)
     logger.info("数据库表结构已就绪")
+
+
+def _upgrade_device_status_table(engine: Engine) -> None:
+    """为存量 device_status 补上容量 / 固件 / 增益 / metrics 列（幂等）。
+
+    ``create_all`` 不会给已存在的表加列，本地 dev.db 这类存量库必须走这里，
+    否则读取新字段会抛 AttributeError。生产 MySQL 若跳过自动建表，请执行
+    ``sql/migration_status_ext.sql``（含 CHECK 约束）而不是依赖本函数。
+    """
+    with engine.begin() as conn:
+        columns = {column["name"] for column in inspect(conn).get_columns("device_status")}
+        missing = [item for item in _STATUS_EXT_COLUMNS if item[0] not in columns]
+        if not missing:
+            return
+        for name, ddl in missing:
+            conn.exec_driver_sql(f"ALTER TABLE device_status ADD COLUMN {name} {ddl}")
+        logger.info("已为 device_status 补充列：%s", ", ".join(name for name, _ in missing))
 
 
 def _upgrade_credential_table(engine: Engine) -> None:

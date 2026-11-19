@@ -304,6 +304,12 @@ def list_statuses(
                 battery_level=status.battery_level,
                 charging=bool(status.charging),
                 recording=bool(status.recording),
+                # getattr 兼容尚未执行迁移的存量库（缺列时显示「—」而不是 500）。
+                storage_free_bytes=getattr(status, "storage_free_bytes", None),
+                storage_total_bytes=getattr(status, "storage_total_bytes", None),
+                firmware_version=getattr(status, "firmware_version", None),
+                gain=getattr(status, "gain", None),
+                metrics=getattr(status, "metrics", None),
                 last_seen_at=status.last_seen_at,
                 last_sync_at=status.last_sync_at,
                 updated_at=status.updated_at,
