@@ -10,15 +10,16 @@ WORKDIR /app
 
 # 先装依赖，利用镜像层缓存
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
+COPY .env .env
 COPY app ./app
 COPY sql ./sql
 COPY scripts ./scripts
 
-EXPOSE 8000
+EXPOSE 8040
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import httpx,os,sys; sys.exit(0 if httpx.get('http://127.0.0.1:8000/healthz', timeout=3).status_code==200 else 1)"
+    CMD python -c "import httpx,os,sys; sys.exit(0 if httpx.get('http://127.0.0.1:8040/healthz', timeout=3).status_code==200 else 1)"
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8040"]
