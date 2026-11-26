@@ -705,6 +705,20 @@ uv run -m pytest              # 117 passed
 - [ ] nginx 已配置 `/voicehub/` 静态托管与 `/voicehub-api/` 反向代理
 - [ ] Casdoor 应用后台已登记管理后台回调地址 `https://office.uassist.cn:40000/voicehub/`
 
+## Docker 部署命令
+
+```
+docker build -t recorder-device-managment-backend .
+
+docker stop recorder-device-managment-backend
+
+docker rm recorder-device-managment-backend
+
+docker run -d --name recorder-device-managment-backend --volume=C:\Files\Documents\Projects\playground-recorder\recorder-device-managment-backend\data:/app/data -p 8040:8040 recorder-device-managment-backend:latest
+
+
+```
+
 ## 11. 后续可扩展点
 
 - **设备状态上报（一期已完成）**：`PUT /api/my/devices/{id}/status` 已开放 APP 代报，
