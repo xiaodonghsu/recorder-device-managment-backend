@@ -77,7 +77,7 @@ def test_userinfo_maps_casdoor_user_to_identity():
 # 生产 /api/userinfo 的真实形态：OIDC claims（不是 Casdoor 用户对象）
 OIDC_USERINFO_CLAIMS = {
     "sub": "7994b554-b159-4a6b-bdba-0703193e6ed8",
-    "iss": "https://office.uassist.cn:40000/auth",
+    "iss": "https://uassist.cn/auth",
     "aud": "6932b8ce0b655b9421b5",
     "preferred_username": "JH000059",
     "name": "胥晓冬",

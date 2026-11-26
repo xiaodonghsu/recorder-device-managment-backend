@@ -168,10 +168,11 @@ mysql -u root -p voicehub_device < sql/migration_status_ext.sql
 
 ### 4.1 实例信息
 
-当前实例：`https://office.uassist.cn:40000/auth`
+当前实例：`https://uassist.cn/auth`（2026-11-26 起切换，原 `https://office.uassist.cn:40000/auth`；
+切换只涉及认证端，管理后台与 API 的部署域名/回调地址不变）。
 
 该实例配置了 **`authPrefix=auth`**，因此所有接口都在 `/auth` 之下。
-OIDC 发现文档 `https://office.uassist.cn:40000/auth/.well-known/openid-configuration` 返回：
+OIDC 发现文档 `https://uassist.cn/auth/.well-known/openid-configuration` 返回：
 
 | 用途 | 端点 |
 |---|---|
@@ -182,9 +183,9 @@ OIDC 发现文档 `https://office.uassist.cn:40000/auth/.well-known/openid-confi
 | JWKS 公钥 | `/auth/.well-known/jwks` |
 | 查询用户 | `/auth/api/get-user?owner=&id=` |
 
-> 服务端签发的 `iss` 为 `http://office.uassist.cn:40000/auth`（明文 http）。
-> 本服务访问使用 `https`（DigiCert 有效证书），并在 JWT 校验时对 http/https 两种
-> issuer 变体一并接受，避免因协议差异导致的校验失败。
+> 新实例发现的 `iss` 为 `https://uassist.cn/auth`（已实测，与访问协议一致；旧实例为明文 http）。
+> JWT 校验仍对 http/https 两种 issuer 变体一并接受，但** issuer 域名不匹配的老 Token 会被拒绝**，
+> 切换认证端后 APP / 管理后台需重新登录换取新 Token。
 
 ### 4.2 Token 校验模式（`CASDOOR_VERIFY_METHOD`）
 
@@ -284,7 +285,7 @@ CASDOOR_APPLICATION=voicehub
 | `optional` | 422 拒绝 | **告警并放行**（可用性优先） | 默认 |
 | `required` | 422 拒绝 | 502 `casdoor_error` 拒绝 | 要求强一致 |
 
-生产实调结论（2026-11-10，`https://office.uassist.cn:40000/auth`）：
+生产实调结论（2026-11-26 复核，`https://uassist.cn/auth`；结论与原实例一致）：
 
 - `?owner=bestlink&id=bestlink/JH000059` → `{"status":"ok","data":{"owner":"bestlink",
   "name":"JH000059","displayName":"胥晓冬","id":"7994b554-…","isForbidden":false}}`；
@@ -690,6 +691,7 @@ uv run -m pytest              # 117 passed
 生产上线前需确认：
 
 - [ ] `.env` 中 `APP_ENV=production`
+- [ ] `CASDOOR_BASE_URL=https://uassist.cn/auth` 已生效；因 issuer 变更，切换后需重新登录
 - [ ] `CASDOOR_CLIENT_ID` / `CASDOOR_CLIENT_SECRET` 已配置（introspect 与严格查询身份所需）
 - [ ] `CASDOOR_VERIFY_EMPLOYEE` 已按一致性要求选定 `optional` / `required`；容器部署时
       已在 `docker-compose.yml` 透传

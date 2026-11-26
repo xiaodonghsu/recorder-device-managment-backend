@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     db_pool_recycle: int = 3600
 
     # ---------------- Casdoor ----------------
-    casdoor_base_url: str = "https://office.uassist.cn:40000/auth"
+    casdoor_base_url: str = "https://uassist.cn/auth"
     casdoor_issuer: str = ""
     # clientId 是公开标识符（会出现在前端 OAuth 跳转 URL 里），可安全地内置默认值；
     # clientSecret 是真正的机密，只能通过环境变量 / .env 提供，不要写进代码。
